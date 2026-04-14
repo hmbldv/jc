@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use similar::TextDiff;
 
 use crate::cli::{
-    Cli, Command, ConfigCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
+    Cli, Command, ConfigCommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand,
+    JiraIssueCommand,
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -87,6 +88,15 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Transition { key, to })) => {
             jira_issue_transition(&key, &to, mode).await
         }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Attachment(
+            JiraAttachmentCommand::List { key },
+        ))) => jira_attachment_list(&key).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Attachment(
+            JiraAttachmentCommand::Get { id, out_dir },
+        ))) => jira_attachment_get(&id, &out_dir).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Attachment(
+            JiraAttachmentCommand::Upload { key, file },
+        ))) => jira_attachment_upload(&key, &file, mode).await,
 
         Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
 
@@ -446,6 +456,166 @@ async fn jira_issue_transition(
     }))
     .emit();
     Ok(())
+}
+
+async fn jira_attachment_list(key: &str) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let issue = jc_jira::issue::get(&client, key).await?;
+
+    let data: Vec<_> = issue
+        .fields
+        .attachment
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "filename": a.filename,
+                "mime_type": a.mime_type,
+                "size": a.size,
+            })
+        })
+        .collect();
+
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(issue.fields.attachment.len()));
+    meta.insert("issue".into(), json!(key));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn jira_attachment_get(id: &str, out_dir: &Path) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let meta = jc_jira::attachments::get_meta(&client, id).await?;
+    let blob = jc_jira::attachments::download(&client, id).await?;
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| CliError::io(format!("mkdir {}: {e}", out_dir.display())))?;
+    let path = out_dir.join(&meta.filename);
+    std::fs::write(&path, &blob.bytes)
+        .map_err(|e| CliError::io(format!("write {}: {e}", path.display())))?;
+
+    let mime = blob.content_type.clone().or(meta.mime_type.clone());
+    let warning = unreadable_mime_warning(mime.as_deref());
+
+    let mut env = Envelope::new(json!({
+        "id": meta.id,
+        "filename": meta.filename,
+        "path": path.display().to_string(),
+        "size": blob.bytes.len(),
+        "mime": mime,
+    }));
+    if let Some(w) = warning {
+        env.warnings.push(w);
+    }
+    env.emit();
+    Ok(())
+}
+
+fn unreadable_mime_warning(mime: Option<&str>) -> Option<String> {
+    let Some(mime) = mime else {
+        return Some("no mime type reported by server".to_string());
+    };
+    let lower = mime.to_ascii_lowercase();
+    let directly_readable = lower.starts_with("text/")
+        || lower.starts_with("image/")
+        || lower == "application/pdf"
+        || lower == "application/json"
+        || lower.contains("javascript")
+        || lower.contains("xml")
+        || lower.contains("yaml")
+        || lower.contains("markdown");
+    if directly_readable {
+        None
+    } else {
+        Some(format!(
+            "mime type '{mime}' may not be directly readable by Claude Code — use a dedicated parser"
+        ))
+    }
+}
+
+async fn jira_attachment_upload(
+    key: &str,
+    file: &Path,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let bytes = std::fs::read(file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
+    let filename = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| CliError::validation(format!("invalid filename: {}", file.display())))?
+        .to_string();
+    let mime = guess_mime_from_ext(file);
+
+    let cfg = Config::from_env()?;
+    let url = format!("https://{}/rest/api/3/issue/{}/attachments", cfg.site, key);
+    let preview = Preview::new("POST", url).with_summary(format!(
+        "Upload {filename} ({} bytes) to {key}",
+        bytes.len()
+    ));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let client = cfg.jira_client()?;
+    let uploaded =
+        jc_jira::attachments::upload(&client, key, &filename, bytes, mime).await?;
+
+    let data: Vec<_> = uploaded
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "filename": a.filename,
+                "size": a.size,
+                "mime_type": a.mime_type,
+            })
+        })
+        .collect();
+
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(uploaded.len()));
+    meta.insert("issue".into(), json!(key));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+fn guess_mime_from_ext(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "yaml" | "yml" => "application/yaml",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "html" | "htm" => "text/html",
+        "csv" => "text/csv",
+        _ => return None,
+    })
 }
 
 fn emit_cancelled() {

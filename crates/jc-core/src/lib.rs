@@ -9,5 +9,5 @@ pub mod error;
 pub mod paginate;
 pub mod retry;
 
-pub use client::Client;
+pub use client::{Client, DownloadedBlob};
 pub use error::{ApiError, Result};

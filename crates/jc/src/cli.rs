@@ -120,6 +120,10 @@ pub enum JiraIssueCommand {
     #[command(subcommand)]
     Comment(JiraCommentCommand),
 
+    /// Attachment operations.
+    #[command(subcommand)]
+    Attachment(JiraAttachmentCommand),
+
     /// Transition an issue to another workflow state.
     Transition {
         /// Issue key, e.g. FOO-123
@@ -127,6 +131,31 @@ pub enum JiraIssueCommand {
         /// Target status name (fuzzy-matched against available transitions)
         #[arg(long)]
         to: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraAttachmentCommand {
+    /// List attachments on an issue.
+    List {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+    /// Download an attachment to disk. Writes to `<out-dir>/<filename>`
+    /// and prints the path so Claude Code can read the file.
+    Get {
+        /// Attachment ID (from `attachment list` or `issue get`)
+        id: String,
+        /// Output directory for downloaded file
+        #[arg(long = "out-dir", default_value = "./attachments")]
+        out_dir: PathBuf,
+    },
+    /// Upload a file as an attachment on an issue.
+    Upload {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Path to the file to upload
+        file: PathBuf,
     },
 }
 

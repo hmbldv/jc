@@ -1,9 +1,18 @@
+use bytes::Bytes;
+use reqwest::multipart::Form;
 use reqwest::{Method, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
 use crate::error::{ApiError, Result};
+
+/// Binary response with content-type metadata. Used for attachment downloads.
+#[derive(Debug)]
+pub struct DownloadedBlob {
+    pub bytes: Bytes,
+    pub content_type: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Client {
@@ -113,6 +122,58 @@ impl Client {
             .await
             .map_err(ApiError::transport)?;
         parse_empty(resp).await
+    }
+
+    /// GET raw bytes from a path. Used for attachment downloads.
+    ///
+    /// The Atlassian attachment content endpoint issues a 303 redirect to
+    /// signed cloud storage. reqwest follows redirects by default and
+    /// strips the Authorization header on cross-origin redirects, which
+    /// is exactly the behavior we want — the signed URL does its own auth.
+    pub async fn download_bytes(&self, path: &str) -> Result<DownloadedBlob> {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .get(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.bytes().await.map_err(ApiError::transport)?;
+            return Err(ApiError::from_response(status, &body));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let bytes = resp.bytes().await.map_err(ApiError::transport)?;
+        Ok(DownloadedBlob { bytes, content_type })
+    }
+
+    /// POST a multipart/form-data body, parsing a JSON response. Sets
+    /// `X-Atlassian-Token: no-check` which Atlassian requires for CSRF-
+    /// exempt file uploads.
+    pub async fn post_multipart<T>(&self, path: &str, form: Form) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .post(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .header("X-Atlassian-Token", "no-check")
+            .multipart(form)
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_response(resp).await
     }
 }
 

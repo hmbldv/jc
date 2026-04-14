@@ -23,6 +23,7 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
     match args.command {
         Command::Config(ConfigCommand::Show) => config_show(),
         Command::Config(ConfigCommand::Test) => config_test().await,
+        Command::Config(ConfigCommand::Set { key, value }) => config_set(&key, &value),
 
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Get { key })) => {
             jira_issue_get(&key).await
@@ -230,6 +231,24 @@ fn apply_assignee(b: JqlBuilder, who: &str) -> JqlBuilder {
 fn config_show() -> Result<(), CliError> {
     let cfg = Config::from_env()?;
     Envelope::new(cfg.redacted_json()).emit();
+    Ok(())
+}
+
+fn config_set(key: &str, value: &str) -> Result<(), CliError> {
+    let allowed = ["site", "email", "token"];
+    if !allowed.contains(&key) {
+        return Err(CliError::validation(format!(
+            "unknown config key '{key}' (expected one of: {})",
+            allowed.join(", ")
+        )));
+    }
+    crate::config::write_keychain(key, value)?;
+    Envelope::new(json!({
+        "key": key,
+        "stored": true,
+        "source": "keychain",
+    }))
+    .emit();
     Ok(())
 }
 

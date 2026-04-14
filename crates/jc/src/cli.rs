@@ -76,6 +76,14 @@ pub enum ConfigCommand {
     Show,
     /// Verify auth end-to-end by calling /rest/api/3/myself.
     Test,
+    /// Store a config value in the OS keychain.
+    /// `key` must be one of: `site`, `email`, `token`.
+    Set {
+        /// Config key (site | email | token)
+        key: String,
+        /// Value to store in the keychain
+        value: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

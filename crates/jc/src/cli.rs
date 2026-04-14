@@ -92,6 +92,21 @@ pub enum JiraCommand {
 
     /// Refresh the local custom-field cache.
     Fields(FieldsCommand),
+
+    /// User operations.
+    #[command(subcommand)]
+    User(JiraUserCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraUserCommand {
+    /// Print the current authenticated user.
+    Me,
+    /// Search users by email, display name, or accountId.
+    Search {
+        /// Search query
+        query: String,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -200,6 +215,58 @@ pub enum JiraIssueCommand {
         #[arg(long)]
         to: String,
     },
+
+    /// Assign (or unassign) an issue.
+    Assign {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Assignee: "me", accountId, email, or display name. Use "none" to unassign.
+        #[arg(long)]
+        to: String,
+    },
+
+    /// Add the current user as a watcher on an issue.
+    Watch {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+
+    /// Remove the current user as a watcher on an issue.
+    Unwatch {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+
+    /// Issue link operations.
+    #[command(subcommand)]
+    Link(JiraLinkCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraLinkCommand {
+    /// List links on an issue.
+    List {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+    /// Add a link. "<KEY> --type Blocks --to OTHER" means "KEY blocks OTHER".
+    Add {
+        /// Source issue key
+        key: String,
+        /// Target issue key
+        #[arg(long)]
+        to: String,
+        /// Link type name (e.g. Blocks, Relates, Duplicate)
+        #[arg(long = "type")]
+        link_type: String,
+    },
+    /// Remove a link by its ID (from `link list`).
+    Remove {
+        /// Link ID
+        link_id: String,
+    },
+    /// List all available link types in the site.
+    Types,
 }
 
 #[derive(Debug, Subcommand)]

@@ -9,6 +9,7 @@ use similar::TextDiff;
 use crate::cli::{
     Cli, Command, ConfCommand, ConfPageCommand, ConfSpaceCommand, ConfigCommand,
     FieldsSubcommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
+    JiraLinkCommand, JiraUserCommand,
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -134,6 +135,24 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         Command::Jira(JiraCommand::Fields(fields_cmd)) => match fields_cmd.command {
             FieldsSubcommand::Sync => jira_fields_sync().await,
         },
+
+        Command::Jira(JiraCommand::User(JiraUserCommand::Me)) => jira_user_me().await,
+        Command::Jira(JiraCommand::User(JiraUserCommand::Search { query })) => {
+            jira_user_search(&query, limit).await
+        }
+
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Assign { key, to })) => {
+            jira_issue_assign(&key, &to, mode).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Watch { key })) => {
+            jira_issue_watch(&key, mode).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Unwatch { key })) => {
+            jira_issue_unwatch(&key, mode).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Link(link_cmd))) => {
+            jira_issue_link(link_cmd, mode).await
+        }
 
         Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => {
             conf_page_get(&id).await
@@ -1017,6 +1036,290 @@ async fn run_cql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
     env.meta = Some(Value::Object(meta));
     env.emit();
     Ok(())
+}
+
+async fn jira_user_me() -> Result<(), CliError> {
+    let client = jira_client()?;
+    let me = jc_jira::users::myself(&client).await?;
+    Envelope::new(json!({
+        "account_id": me.account_id,
+        "display_name": me.display_name,
+        "email": me.email_address,
+        "active": me.active,
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn jira_user_search(query: &str, limit: usize) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let max = if limit == 0 { 50 } else { limit };
+    let users = jc_jira::users::search(&client, query, max).await?;
+    let data: Vec<_> = users
+        .iter()
+        .map(|u| {
+            json!({
+                "account_id": u.account_id,
+                "display_name": u.display_name,
+                "email": u.email_address,
+            })
+        })
+        .collect();
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(users.len()));
+    meta.insert("query".into(), json!(query));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+/// Resolve an assignee descriptor ("me", accountId, or free text) to an
+/// accountId. "none" disassigns.
+async fn resolve_assignee(
+    client: &Client,
+    who: &str,
+) -> Result<Option<String>, CliError> {
+    let trimmed = who.trim();
+    if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    if trimmed.eq_ignore_ascii_case("me") || trimmed.eq_ignore_ascii_case("currentuser") {
+        let me = jc_jira::users::myself(client).await?;
+        return Ok(Some(me.account_id));
+    }
+    // Heuristic: looks like an accountId (alphanum + dashes, no spaces, long)
+    if !trimmed.contains(' ') && !trimmed.contains('@') && trimmed.len() >= 20 {
+        return Ok(Some(trimmed.to_string()));
+    }
+    // Otherwise search.
+    let users = jc_jira::users::search(client, trimmed, 5).await?;
+    let first = users.into_iter().next().ok_or_else(|| {
+        CliError::validation(format!("no user matches '{who}'"))
+    })?;
+    Ok(Some(first.account_id))
+}
+
+async fn jira_issue_assign(key: &str, to: &str, mode: PreviewMode) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let account_id = resolve_assignee(&client, to).await?;
+
+    let url = format!("https://{}/rest/api/3/issue/{}/assignee", cfg.site, key);
+    let body_json = json!({ "accountId": account_id });
+    let preview = Preview::new("PUT", url)
+        .with_body(body_json)
+        .with_summary(match &account_id {
+            Some(id) => format!("Assign {key} to {id}"),
+            None => format!("Unassign {key}"),
+        });
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    jc_jira::issue::assign(&client, key, account_id.as_deref()).await?;
+    Envelope::new(json!({
+        "assigned": account_id.is_some(),
+        "key": key,
+        "account_id": account_id,
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn jira_issue_watch(key: &str, mode: PreviewMode) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let me = jc_jira::users::myself(&client).await?;
+
+    let url = format!("https://{}/rest/api/3/issue/{}/watchers", cfg.site, key);
+    let preview = Preview::new("POST", url)
+        .with_body(json!(me.account_id))
+        .with_summary(format!("Watch {key} as {}", me.display_name));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    jc_jira::issue::add_watcher(&client, key, &me.account_id).await?;
+    Envelope::new(json!({ "watched": true, "key": key })).emit();
+    Ok(())
+}
+
+async fn jira_issue_unwatch(key: &str, mode: PreviewMode) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let me = jc_jira::users::myself(&client).await?;
+
+    let url = format!(
+        "https://{}/rest/api/3/issue/{}/watchers?accountId={}",
+        cfg.site, key, me.account_id
+    );
+    let preview = Preview::new("DELETE", url)
+        .with_summary(format!("Unwatch {key} as {}", me.display_name));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    jc_jira::issue::remove_watcher(&client, key, &me.account_id).await?;
+    Envelope::new(json!({ "unwatched": true, "key": key })).emit();
+    Ok(())
+}
+
+async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), CliError> {
+    match cmd {
+        JiraLinkCommand::List { key } => {
+            let client = jira_client()?;
+            let links = jc_jira::issue_links::list_on_issue(&client, &key).await?;
+            let data: Vec<_> = links
+                .iter()
+                .map(|l| {
+                    json!({
+                        "id": l.id,
+                        "type": l.link_type.name,
+                        "outward": l.link_type.outward,
+                        "inward": l.link_type.inward,
+                        "inward_issue": l.inward_issue.as_ref().map(|i| json!({
+                            "key": i.key,
+                            "summary": i.fields.as_ref().and_then(|f| f.summary.as_ref()),
+                            "status": i.fields.as_ref().and_then(|f| f.status.as_ref().map(|s| &s.name)),
+                        })),
+                        "outward_issue": l.outward_issue.as_ref().map(|i| json!({
+                            "key": i.key,
+                            "summary": i.fields.as_ref().and_then(|f| f.summary.as_ref()),
+                            "status": i.fields.as_ref().and_then(|f| f.status.as_ref().map(|s| &s.name)),
+                        })),
+                    })
+                })
+                .collect();
+            let mut env = Envelope::new(data);
+            let mut meta = serde_json::Map::new();
+            meta.insert("count".into(), json!(links.len()));
+            meta.insert("issue".into(), json!(key));
+            env.meta = Some(Value::Object(meta));
+            env.emit();
+            Ok(())
+        }
+        JiraLinkCommand::Add {
+            key,
+            to,
+            link_type,
+        } => {
+            let cfg = Config::from_env()?;
+            let url = format!("https://{}/rest/api/3/issueLink", cfg.site);
+            let body = json!({
+                "type": { "name": link_type },
+                "inwardIssue": { "key": to },
+                "outwardIssue": { "key": key },
+            });
+            let preview = Preview::new("POST", url)
+                .with_body(body)
+                .with_summary(format!("Link {key} -[{link_type}]-> {to}"));
+
+            match mode {
+                PreviewMode::DryRun => {
+                    preview.emit_dry_run();
+                    return Ok(());
+                }
+                PreviewMode::Confirm => {
+                    if !preview.confirm_interactive()? {
+                        emit_cancelled();
+                        return Ok(());
+                    }
+                }
+                PreviewMode::Send => {}
+            }
+
+            let client = cfg.jira_client()?;
+            jc_jira::issue_links::add(&client, &link_type, &key, &to).await?;
+            Envelope::new(json!({
+                "linked": true,
+                "from": key,
+                "to": to,
+                "type": link_type,
+            }))
+            .emit();
+            Ok(())
+        }
+        JiraLinkCommand::Remove { link_id } => {
+            let cfg = Config::from_env()?;
+            let url = format!("https://{}/rest/api/3/issueLink/{}", cfg.site, link_id);
+            let preview = Preview::new("DELETE", url)
+                .with_summary(format!("Remove issue link {link_id}"));
+
+            match mode {
+                PreviewMode::DryRun => {
+                    preview.emit_dry_run();
+                    return Ok(());
+                }
+                PreviewMode::Confirm => {
+                    if !preview.confirm_interactive()? {
+                        emit_cancelled();
+                        return Ok(());
+                    }
+                }
+                PreviewMode::Send => {}
+            }
+
+            let client = cfg.jira_client()?;
+            jc_jira::issue_links::remove(&client, &link_id).await?;
+            Envelope::new(json!({ "removed": true, "id": link_id })).emit();
+            Ok(())
+        }
+        JiraLinkCommand::Types => {
+            let client = jira_client()?;
+            let types = jc_jira::issue_links::list_types(&client).await?;
+            let data: Vec<_> = types
+                .iter()
+                .map(|t| {
+                    json!({
+                        "id": t.id,
+                        "name": t.name,
+                        "inward": t.inward,
+                        "outward": t.outward,
+                    })
+                })
+                .collect();
+            let mut env = Envelope::new(data);
+            let mut meta = serde_json::Map::new();
+            meta.insert("count".into(), json!(types.len()));
+            env.meta = Some(Value::Object(meta));
+            env.emit();
+            Ok(())
+        }
+    }
 }
 
 async fn jira_fields_sync() -> Result<(), CliError> {

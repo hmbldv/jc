@@ -118,3 +118,29 @@ pub async fn edit(client: &Client, key: &str, fields: &Value) -> Result<()> {
     let body = serde_json::json!({ "fields": fields });
     client.put_no_content(&path, &body).await
 }
+
+/// PUT /rest/api/3/issue/{key}/assignee
+///
+/// Pass `None` to unassign. Jira accepts `{"accountId": null}`.
+pub async fn assign(client: &Client, key: &str, account_id: Option<&str>) -> Result<()> {
+    let path = format!("rest/api/3/issue/{key}/assignee");
+    let body = serde_json::json!({ "accountId": account_id });
+    client.put_no_content(&path, &body).await
+}
+
+/// POST /rest/api/3/issue/{key}/watchers
+///
+/// Body is a bare JSON string containing the accountId (this is genuinely
+/// the endpoint's shape — not an object).
+pub async fn add_watcher(client: &Client, key: &str, account_id: &str) -> Result<()> {
+    let path = format!("rest/api/3/issue/{key}/watchers");
+    client.post_no_content(&path, &account_id).await
+}
+
+/// DELETE /rest/api/3/issue/{key}/watchers?accountId=...
+pub async fn remove_watcher(client: &Client, key: &str, account_id: &str) -> Result<()> {
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(account_id.as_bytes()).collect();
+    let path = format!("rest/api/3/issue/{key}/watchers?accountId={encoded}");
+    client.delete_no_content(&path).await
+}

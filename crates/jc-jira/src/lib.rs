@@ -14,6 +14,7 @@ pub mod attachments;
 pub mod comment;
 pub mod fields;
 pub mod issue;
+pub mod issue_links;
 pub mod jql;
 pub mod search;
 pub mod transitions;

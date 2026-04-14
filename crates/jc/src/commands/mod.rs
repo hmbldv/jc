@@ -1,13 +1,21 @@
+use std::path::Path;
+
 use jc_core::Client;
 use jc_jira::jql::JqlBuilder;
+use serde_json::{Value, json};
 
-use crate::cli::{Cli, Command, ConfigCommand, JiraCommand, JiraIssueCommand};
+use crate::cli::{
+    Cli, Command, ConfigCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
+};
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
+use crate::preview::{Preview, PreviewMode};
 
 pub async fn dispatch(args: Cli) -> Result<(), CliError> {
     let limit = args.limit;
     let show_query = args.show_query;
+    let mode = PreviewMode::from_flags(args.dry_run, args.confirm);
+
     match args.command {
         Command::Config(ConfigCommand::Show) => config_show(),
         Command::Config(ConfigCommand::Test) => config_test().await,
@@ -57,6 +65,9 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
             b = b.order_by("updated DESC");
             run_jql(&b.build(), limit, show_query).await
         }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
+            JiraCommentCommand::Add { key, body_file },
+        ))) => jira_comment_add(&key, &body_file, mode).await,
 
         Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
 
@@ -83,7 +94,7 @@ fn config_show() -> Result<(), CliError> {
 async fn config_test() -> Result<(), CliError> {
     let client = jira_client()?;
     let me = jc_jira::users::myself(&client).await?;
-    Envelope::new(serde_json::json!({
+    Envelope::new(json!({
         "ok": true,
         "account_id": me.account_id,
         "display_name": me.display_name,
@@ -104,7 +115,7 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
         .as_ref()
         .map(jc_adf::to_markdown);
 
-    let data = serde_json::json!({
+    let data = json!({
         "id": issue.id,
         "key": issue.key,
         "summary": issue.fields.summary,
@@ -112,11 +123,11 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
         "status": issue.fields.status.as_ref().map(|s| &s.name),
         "status_category": issue.fields.status.as_ref().and_then(|s| s.category.as_ref().map(|c| &c.key)),
         "priority": issue.fields.priority.as_ref().map(|p| &p.name),
-        "assignee": issue.fields.assignee.as_ref().map(|u| serde_json::json!({
+        "assignee": issue.fields.assignee.as_ref().map(|u| json!({
             "account_id": u.account_id,
             "display_name": u.display_name,
         })),
-        "reporter": issue.fields.reporter.as_ref().map(|u| serde_json::json!({
+        "reporter": issue.fields.reporter.as_ref().map(|u| json!({
             "account_id": u.account_id,
             "display_name": u.display_name,
         })),
@@ -125,7 +136,7 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
         "comments": {
             "count": issue.fields.comment.as_ref().map(|c| c.total).unwrap_or(0),
         },
-        "attachments": issue.fields.attachment.iter().map(|a| serde_json::json!({
+        "attachments": issue.fields.attachment.iter().map(|a| json!({
             "id": a.id,
             "filename": a.filename,
             "mime_type": a.mime_type,
@@ -151,7 +162,7 @@ async fn run_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
     let issues: Vec<_> = hits
         .iter()
         .map(|h| {
-            serde_json::json!({
+            json!({
                 "key": h.key,
                 "summary": h.fields.summary,
                 "status": h.fields.status.as_ref().map(|s| &s.name),
@@ -165,14 +176,65 @@ async fn run_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
         .collect();
 
     let mut meta = serde_json::Map::new();
-    meta.insert("count".into(), serde_json::json!(hits.len()));
+    meta.insert("count".into(), json!(hits.len()));
     if show_query {
-        meta.insert("query".into(), serde_json::json!(query));
+        meta.insert("query".into(), json!(query));
     }
 
     let mut env = Envelope::new(issues);
-    env.meta = Some(serde_json::Value::Object(meta));
+    env.meta = Some(Value::Object(meta));
     env.emit();
+    Ok(())
+}
+
+async fn jira_comment_add(
+    key: &str,
+    body_file: &Path,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file).map_err(|e| {
+        CliError::io(format!("read {}: {e}", body_file.display()))
+    })?;
+    if md.trim().is_empty() {
+        return Err(CliError::validation(format!(
+            "body file {} is empty",
+            body_file.display()
+        )));
+    }
+    let adf = jc_adf::to_adf(&md);
+
+    let cfg = Config::from_env()?;
+    let url = format!("https://{}/rest/api/3/issue/{}/comment", cfg.site, key);
+    let preview = Preview::new("POST", url)
+        .with_body(json!({ "body": adf }))
+        .with_summary(format!("Add comment to {key}"));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                let mut env = Envelope::new(json!({ "cancelled": true }));
+                let mut meta = serde_json::Map::new();
+                meta.insert("mode".into(), json!("confirm"));
+                env.meta = Some(Value::Object(meta));
+                env.emit();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let client = cfg.jira_client()?;
+    let comment = jc_jira::comment::add(&client, key, &adf).await?;
+    Envelope::new(json!({
+        "id": comment.id,
+        "created": comment.created,
+        "author": comment.author.as_ref().map(|u| &u.display_name),
+    }))
+    .emit();
     Ok(())
 }
 

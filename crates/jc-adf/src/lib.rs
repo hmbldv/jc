@@ -31,3 +31,4 @@ pub mod unknown;
 pub type AdfDocument = serde_json::Value;
 
 pub use from_adf::to_markdown;
+pub use to_adf::to_adf;

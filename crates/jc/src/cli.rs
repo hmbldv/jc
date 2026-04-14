@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -112,6 +114,23 @@ pub enum JiraIssueCommand {
         /// Restrict to a single project
         #[arg(long)]
         project: Option<String>,
+    },
+
+    /// Comment operations.
+    #[command(subcommand)]
+    Comment(JiraCommentCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraCommentCommand {
+    /// Add a comment to an issue. Body is read from a markdown file and
+    /// converted to ADF before sending.
+    Add {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Path to a markdown file containing the comment body
+        #[arg(long = "body-file")]
+        body_file: PathBuf,
     },
 }
 

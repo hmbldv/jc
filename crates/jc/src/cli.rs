@@ -343,10 +343,40 @@ pub enum ConfCommand {
     #[command(subcommand)]
     Space(ConfSpaceCommand),
 
+    /// Attachment operations.
+    #[command(subcommand)]
+    Attachment(ConfAttachmentCommand),
+
     /// Raw CQL query.
     Cql {
         /// The CQL query to execute.
         query: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfAttachmentCommand {
+    /// List attachments on a page.
+    List {
+        /// Page ID
+        #[arg(long)]
+        page: String,
+    },
+    /// Download an attachment to disk.
+    Get {
+        /// Attachment ID
+        id: String,
+        /// Output directory for downloaded file
+        #[arg(long = "out-dir", default_value = "./attachments")]
+        out_dir: PathBuf,
+    },
+    /// Upload a file as an attachment on a page.
+    Upload {
+        /// Target page ID
+        #[arg(long)]
+        page: String,
+        /// Path to the file to upload
+        file: PathBuf,
     },
 }
 

@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use similar::TextDiff;
 
 use crate::cli::{
-    Cli, Command, ConfCommand, ConfPageCommand, ConfSpaceCommand, ConfigCommand,
-    FieldsSubcommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
-    JiraLinkCommand, JiraUserCommand,
+    Cli, Command, ConfAttachmentCommand, ConfCommand, ConfPageCommand, ConfSpaceCommand,
+    ConfigCommand, FieldsSubcommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand,
+    JiraIssueCommand, JiraLinkCommand, JiraUserCommand,
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -188,6 +188,15 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         }
         Command::Conf(ConfCommand::Cql { query }) => {
             run_cql(&query, limit, show_query).await
+        }
+        Command::Conf(ConfCommand::Attachment(ConfAttachmentCommand::List { page })) => {
+            conf_attachment_list(&page, limit).await
+        }
+        Command::Conf(ConfCommand::Attachment(ConfAttachmentCommand::Get { id, out_dir })) => {
+            conf_attachment_get(&id, &out_dir).await
+        }
+        Command::Conf(ConfCommand::Attachment(ConfAttachmentCommand::Upload { page, file })) => {
+            conf_attachment_upload(&page, &file, mode).await
         }
 
         Command::Publish {
@@ -1320,6 +1329,118 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
             Ok(())
         }
     }
+}
+
+async fn conf_attachment_list(page_id: &str, limit: usize) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let atts = jc_conf::attachments::list_on_page(&client, page_id, limit).await?;
+    let data: Vec<_> = atts
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "title": a.title,
+                "media_type": a.media_type,
+                "file_size": a.file_size,
+                "page_id": a.page_id,
+                "download_link": a.download_link,
+            })
+        })
+        .collect();
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(atts.len()));
+    meta.insert("page".into(), json!(page_id));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn conf_attachment_get(id: &str, out_dir: &Path) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let (meta_rec, blob) = jc_conf::attachments::download(&client, id).await?;
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| CliError::io(format!("mkdir {}: {e}", out_dir.display())))?;
+    let path = out_dir.join(&meta_rec.title);
+    std::fs::write(&path, &blob.bytes)
+        .map_err(|e| CliError::io(format!("write {}: {e}", path.display())))?;
+
+    let mime = blob.content_type.clone().or(meta_rec.media_type.clone());
+    let warning = unreadable_mime_warning(mime.as_deref());
+
+    let mut env = Envelope::new(json!({
+        "id": meta_rec.id,
+        "title": meta_rec.title,
+        "path": path.display().to_string(),
+        "size": blob.bytes.len(),
+        "mime": mime,
+    }));
+    if let Some(w) = warning {
+        env.warnings.push(w);
+    }
+    env.emit();
+    Ok(())
+}
+
+async fn conf_attachment_upload(
+    page_id: &str,
+    file: &Path,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let bytes = std::fs::read(file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
+    let filename = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| CliError::validation(format!("invalid filename: {}", file.display())))?
+        .to_string();
+    let mime = guess_mime_from_ext(file);
+
+    let cfg = Config::from_env()?;
+    let url = format!(
+        "https://{}/wiki/rest/api/content/{}/child/attachment",
+        cfg.site, page_id
+    );
+    let preview = Preview::new("POST", url).with_summary(format!(
+        "Upload {filename} ({} bytes) to page {page_id}",
+        bytes.len()
+    ));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let client = cfg.jira_client()?;
+    let uploaded =
+        jc_conf::attachments::upload(&client, page_id, &filename, bytes, mime).await?;
+    let data: Vec<_> = uploaded
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "title": a.title,
+                "type": a.content_type,
+            })
+        })
+        .collect();
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(uploaded.len()));
+    meta.insert("page".into(), json!(page_id));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
 }
 
 async fn jira_fields_sync() -> Result<(), CliError> {

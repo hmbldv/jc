@@ -1,12 +1,12 @@
 //! Confluence Cloud REST v2 typed client.
 //!
-//! Module map (stubs land here as they are implemented):
-//! - `page` — get/list/search/create/update/move/delete/children
-//!   Reads request `body-format=atlas_doc_format` so one ADF converter
-//!   serves both Jira and Confluence.
-//! - `space` — list/get
-//! - `search` — CQL
-//! - `attachments` — list/get/upload
+//! Module map:
+//! - `page` — get/list/create/update/delete, body-format=atlas_doc_format
+//! - `space` — list, get, find_by_key (key->id resolution)
+//! - `search` — CQL (served by the v1 endpoint; v2 doesn't cover CQL yet)
 //! - `types` — shared request/response types
 
+pub mod page;
+pub mod search;
+pub mod space;
 pub mod types;

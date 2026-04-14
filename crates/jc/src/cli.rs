@@ -200,5 +200,88 @@ pub enum JiraCommentCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfCommand {
-    // Populated as endpoints land. `page get` is the first planned command.
+    /// Page operations.
+    #[command(subcommand)]
+    Page(ConfPageCommand),
+
+    /// Space operations.
+    #[command(subcommand)]
+    Space(ConfSpaceCommand),
+
+    /// Raw CQL query.
+    Cql {
+        /// The CQL query to execute.
+        query: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfPageCommand {
+    /// Fetch a page by ID, body rendered as markdown.
+    Get {
+        /// Page ID
+        id: String,
+    },
+    /// List pages in a space, or children of a specific parent page.
+    List {
+        /// Space key (e.g. ENG)
+        #[arg(long)]
+        space: String,
+        /// Restrict to direct children of this parent page ID
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Search pages by CQL text match.
+    Search {
+        /// Search terms (matched against title and content)
+        terms: String,
+        /// Restrict to a single space (by key)
+        #[arg(long)]
+        space: Option<String>,
+    },
+    /// Create a new page from a markdown file.
+    Create {
+        /// Space key (e.g. ENG)
+        #[arg(long)]
+        space: String,
+        /// Page title
+        #[arg(long)]
+        title: String,
+        /// Path to markdown file containing the page body
+        #[arg(long = "from-markdown")]
+        from_markdown: PathBuf,
+        /// Optional parent page ID
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Replace a page's body. Shows a diff against current state in preview.
+    Update {
+        /// Page ID
+        id: String,
+        /// Path to markdown file containing the new body
+        #[arg(long = "from-markdown")]
+        from_markdown: PathBuf,
+        /// Override the title (keeps existing if omitted)
+        #[arg(long)]
+        title: Option<String>,
+        /// Override the expected current version number (default: fetch)
+        #[arg(long = "expected-version")]
+        expected_version: Option<u64>,
+    },
+    /// Delete a page.
+    Delete {
+        /// Page ID
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfSpaceCommand {
+    /// List all spaces.
+    List,
+    /// Look up a space by key or numeric ID.
+    Get {
+        /// Space key (e.g. ENG) or numeric ID
+        key_or_id: String,
+    },
 }

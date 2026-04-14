@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use similar::TextDiff;
 
 use crate::cli::{
-    Cli, Command, ConfigCommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand,
-    JiraIssueCommand,
+    Cli, Command, ConfCommand, ConfPageCommand, ConfSpaceCommand, ConfigCommand,
+    JiraAttachmentCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -100,8 +100,40 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
 
         Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
 
-        Command::Conf(_) => {
-            unreachable!("conf subcommands not yet implemented")
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => {
+            conf_page_get(&id).await
+        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::List { space, parent })) => {
+            conf_page_list(&space, parent.as_deref(), limit).await
+        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Search { terms, space })) => {
+            conf_page_search(&terms, space.as_deref(), limit, show_query).await
+        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Create {
+            space,
+            title,
+            from_markdown,
+            parent,
+        })) => {
+            conf_page_create(&space, &title, &from_markdown, parent.as_deref(), mode).await
+        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Update {
+            id,
+            from_markdown,
+            title,
+            expected_version,
+        })) => {
+            conf_page_update(&id, &from_markdown, title.as_deref(), expected_version, mode).await
+        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Delete { id })) => {
+            conf_page_delete(&id, mode).await
+        }
+        Command::Conf(ConfCommand::Space(ConfSpaceCommand::List)) => conf_space_list().await,
+        Command::Conf(ConfCommand::Space(ConfSpaceCommand::Get { key_or_id })) => {
+            conf_space_get(&key_or_id).await
+        }
+        Command::Conf(ConfCommand::Cql { query }) => {
+            run_cql(&query, limit, show_query).await
         }
     }
 }
@@ -616,6 +648,322 @@ fn guess_mime_from_ext(path: &Path) -> Option<&'static str> {
         "csv" => "text/csv",
         _ => return None,
     })
+}
+
+async fn conf_page_get(id: &str) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let page = jc_conf::page::get(&client, id).await?;
+    let adf = page.body.as_ref().and_then(|b| b.as_adf());
+    let markdown = adf.as_ref().map(jc_adf::to_markdown);
+
+    Envelope::new(json!({
+        "id": page.id,
+        "title": page.title,
+        "space_id": page.space_id,
+        "parent_id": page.parent_id,
+        "status": page.status,
+        "version": page.version.as_ref().map(|v| json!({
+            "number": v.number,
+            "created_at": v.created_at,
+        })),
+        "body_markdown": markdown,
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn conf_page_list(
+    space_key: &str,
+    parent: Option<&str>,
+    limit: usize,
+) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let space_id = jc_conf::space::resolve_id(&client, space_key).await?;
+    let pages = jc_conf::page::list(&client, &space_id, parent, limit).await?;
+
+    let data: Vec<_> = pages
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "title": p.title,
+                "parent_id": p.parent_id,
+                "status": p.status,
+                "created_at": p.created_at,
+            })
+        })
+        .collect();
+
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(pages.len()));
+    meta.insert("space".into(), json!(space_key));
+    meta.insert("space_id".into(), json!(space_id));
+    if let Some(p) = parent {
+        meta.insert("parent".into(), json!(p));
+    }
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn conf_page_search(
+    terms: &str,
+    space: Option<&str>,
+    limit: usize,
+    show_query: bool,
+) -> Result<(), CliError> {
+    // Compile a small CQL expression from --terms and --space.
+    // CQL string literals use double quotes; escape any embedded quotes.
+    let escaped = terms.replace('"', "\\\"");
+    let mut query = format!("type = \"page\" AND text ~ \"{escaped}\"");
+    if let Some(s) = space {
+        query.push_str(&format!(" AND space = \"{}\"", s.replace('"', "\\\"")));
+    }
+    run_cql(&query, limit, show_query).await
+}
+
+async fn conf_page_create(
+    space_key: &str,
+    title: &str,
+    body_file: &Path,
+    parent: Option<&str>,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", body_file.display())))?;
+    if md.trim().is_empty() {
+        return Err(CliError::validation(format!(
+            "body file {} is empty",
+            body_file.display()
+        )));
+    }
+    let adf = jc_adf::to_adf(&md);
+
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let space_id = jc_conf::space::resolve_id(&client, space_key).await?;
+
+    let req = jc_conf::page::CreatePageRequest {
+        space_id: &space_id,
+        status: "current",
+        title,
+        parent_id: parent,
+        body: jc_conf::page::BodyRequest::from_adf(&adf),
+    };
+
+    let url = format!("https://{}/wiki/api/v2/pages", cfg.site);
+    let preview = Preview::new("POST", url)
+        .with_body(serde_json::to_value(&req).unwrap_or_else(|_| json!(null)))
+        .with_summary(format!("Create page '{title}' in space {space_key}"));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let page = jc_conf::page::create(&client, &req).await?;
+    Envelope::new(json!({
+        "id": page.id,
+        "title": page.title,
+        "space_id": page.space_id,
+        "parent_id": page.parent_id,
+        "version": page.version.as_ref().map(|v| v.number),
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn conf_page_update(
+    id: &str,
+    body_file: &Path,
+    new_title: Option<&str>,
+    expected_version: Option<u64>,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", body_file.display())))?;
+    if md.trim().is_empty() {
+        return Err(CliError::validation(format!(
+            "body file {} is empty",
+            body_file.display()
+        )));
+    }
+    let new_adf = jc_adf::to_adf(&md);
+    let new_markdown = jc_adf::to_markdown(&new_adf);
+
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+
+    // Fetch current page to obtain version + existing title + current body
+    // (for diff preview).
+    let current = jc_conf::page::get(&client, id).await?;
+    let current_version = current
+        .version
+        .as_ref()
+        .map(|v| v.number)
+        .ok_or_else(|| CliError::validation(format!("page {id} has no version field")))?;
+    let next_version = expected_version.unwrap_or(current_version) + 1;
+
+    let current_markdown = current
+        .body
+        .as_ref()
+        .and_then(|b| b.as_adf())
+        .as_ref()
+        .map(jc_adf::to_markdown)
+        .unwrap_or_default();
+    let diff = unified_diff(&current_markdown, &new_markdown);
+
+    let title = new_title.unwrap_or(&current.title);
+
+    let req = jc_conf::page::UpdatePageRequest {
+        id,
+        status: "current",
+        title,
+        version: jc_conf::page::VersionRequest {
+            number: next_version,
+        },
+        body: jc_conf::page::BodyRequest::from_adf(&new_adf),
+    };
+
+    let url = format!("https://{}/wiki/api/v2/pages/{}", cfg.site, id);
+    let preview = Preview::new("PUT", url)
+        .with_body(serde_json::to_value(&req).unwrap_or_else(|_| json!(null)))
+        .with_summary(format!(
+            "Update page {id} '{title}' (v{current_version} -> v{next_version})"
+        ))
+        .with_diff(diff);
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let updated = jc_conf::page::update(&client, id, &req).await?;
+    Envelope::new(json!({
+        "id": updated.id,
+        "title": updated.title,
+        "version": updated.version.as_ref().map(|v| v.number),
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn conf_page_delete(id: &str, mode: PreviewMode) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let url = format!("https://{}/wiki/api/v2/pages/{}", cfg.site, id);
+    let preview = Preview::new("DELETE", url).with_summary(format!("Delete page {id}"));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let client = cfg.jira_client()?;
+    jc_conf::page::delete(&client, id).await?;
+    Envelope::new(json!({ "deleted": true, "id": id })).emit();
+    Ok(())
+}
+
+async fn conf_space_list() -> Result<(), CliError> {
+    let client = jira_client()?;
+    let spaces = jc_conf::space::list(&client, &[]).await?;
+    let data: Vec<_> = spaces
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "key": s.key,
+                "name": s.name,
+                "type": s.space_type,
+                "homepage_id": s.homepage_id,
+            })
+        })
+        .collect();
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(spaces.len()));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn conf_space_get(key_or_id: &str) -> Result<(), CliError> {
+    let client = jira_client()?;
+    // If it parses as a number, treat as ID; otherwise resolve by key.
+    let space = if key_or_id.chars().all(|c| c.is_ascii_digit()) {
+        jc_conf::space::get(&client, key_or_id).await?
+    } else {
+        jc_conf::space::find_by_key(&client, key_or_id)
+            .await?
+            .ok_or_else(|| CliError::validation(format!("space '{key_or_id}' not found")))?
+    };
+    Envelope::new(json!({
+        "id": space.id,
+        "key": space.key,
+        "name": space.name,
+        "type": space.space_type,
+        "homepage_id": space.homepage_id,
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn run_cql(query: &str, limit: usize, show_query: bool) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let hits = jc_conf::search::cql(&client, query, limit).await?;
+
+    let data: Vec<_> = hits
+        .iter()
+        .map(|h| {
+            json!({
+                "id": h.content.as_ref().map(|c| &c.id),
+                "title": h.content.as_ref().map(|c| &c.title),
+                "type": h.content.as_ref().map(|c| &c.content_type),
+                "space_id": h.content.as_ref().and_then(|c| c.space_id.as_ref()),
+                "excerpt": h.excerpt,
+                "url": h.url,
+                "last_modified": h.last_modified,
+            })
+        })
+        .collect();
+
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(hits.len()));
+    if show_query {
+        meta.insert("query".into(), json!(query));
+    }
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
 }
 
 fn emit_cancelled() {

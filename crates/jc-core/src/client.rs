@@ -1,4 +1,5 @@
 use reqwest::{Method, Response};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
@@ -36,6 +37,26 @@ impl Client {
             .request(method, url)
             .basic_auth(&self.email, Some(&self.token))
             .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_response(resp).await
+    }
+
+    /// POST a JSON body and parse a JSON response. Used for the new Atlassian
+    /// search endpoints which take structured request bodies.
+    pub async fn post_json<B, T>(&self, path: &str, body: &B) -> Result<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .post(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(body)
             .send()
             .await
             .map_err(ApiError::transport)?;

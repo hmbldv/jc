@@ -3,11 +3,16 @@ use crate::config::Config;
 use crate::output::{CliError, Envelope};
 
 pub async fn dispatch(args: Cli) -> Result<(), CliError> {
+    let limit = args.limit;
+    let show_query = args.show_query;
     match args.command {
         Command::Config(ConfigCommand::Show) => config_show(),
         Command::Config(ConfigCommand::Test) => config_test().await,
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Get { key })) => {
             jira_issue_get(&key).await
+        }
+        Command::Jira(JiraCommand::Jql { query }) => {
+            jira_jql(&query, limit, show_query).await
         }
         Command::Conf(_) => {
             unreachable!("conf subcommands not yet implemented")
@@ -83,6 +88,39 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
             "{non_inline} attachment(s) available — use `jc jira issue attachment get <id>` to download"
         ));
     }
+    env.emit();
+    Ok(())
+}
+
+async fn jira_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let hits = jc_jira::search::jql(&client, query, jc_jira::search::DEFAULT_FIELDS, limit).await?;
+
+    let issues: Vec<_> = hits
+        .iter()
+        .map(|h| {
+            serde_json::json!({
+                "key": h.key,
+                "summary": h.fields.summary,
+                "status": h.fields.status.as_ref().map(|s| &s.name),
+                "assignee": h.fields.assignee.as_ref().map(|u| &u.display_name),
+                "priority": h.fields.priority.as_ref().map(|p| &p.name),
+                "issue_type": h.fields.issuetype.as_ref().map(|t| &t.name),
+                "updated": h.fields.updated,
+                "labels": h.fields.labels,
+            })
+        })
+        .collect();
+
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), serde_json::json!(hits.len()));
+    if show_query {
+        meta.insert("query".into(), serde_json::json!(query));
+    }
+
+    let mut env = Envelope::new(issues);
+    env.meta = Some(serde_json::Value::Object(meta));
     env.emit();
     Ok(())
 }

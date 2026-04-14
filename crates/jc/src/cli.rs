@@ -63,6 +63,12 @@ pub enum JiraCommand {
     /// Issue-level operations.
     #[command(subcommand)]
     Issue(JiraIssueCommand),
+
+    /// Raw JQL query. Auto-paginates; use --limit to cap results.
+    Jql {
+        /// The JQL query to execute.
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

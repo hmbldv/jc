@@ -11,5 +11,6 @@
 //! - `types` — shared request/response types
 
 pub mod issue;
+pub mod search;
 pub mod types;
 pub mod users;

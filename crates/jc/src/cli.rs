@@ -78,6 +78,41 @@ pub enum JiraIssueCommand {
         /// Issue key, e.g. FOO-123
         key: String,
     },
+
+    /// List issues matching the given filters. Filters AND together.
+    List {
+        /// Project key (e.g. FOO)
+        #[arg(long)]
+        project: Option<String>,
+        /// Status name (e.g. "In Progress")
+        #[arg(long)]
+        status: Option<String>,
+        /// Assignee: account ID, display name, or `me` (= currentUser())
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Issue type name (e.g. Bug, Story)
+        #[arg(long = "type")]
+        issue_type: Option<String>,
+        /// Updated within JQL time expression (e.g. -7d, -1w, -24h)
+        #[arg(long)]
+        updated: Option<String>,
+    },
+
+    /// List issues assigned to the current user.
+    Mine {
+        /// Optional status filter (e.g. "In Progress")
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Fuzzy-search issues by summary text.
+    Search {
+        /// Search terms (matched against issue summary)
+        terms: String,
+        /// Restrict to a single project
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

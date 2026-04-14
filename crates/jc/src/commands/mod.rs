@@ -1,3 +1,6 @@
+use jc_core::Client;
+use jc_jira::jql::JqlBuilder;
+
 use crate::cli::{Cli, Command, ConfigCommand, JiraCommand, JiraIssueCommand};
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -8,15 +11,66 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
     match args.command {
         Command::Config(ConfigCommand::Show) => config_show(),
         Command::Config(ConfigCommand::Test) => config_test().await,
+
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Get { key })) => {
             jira_issue_get(&key).await
         }
-        Command::Jira(JiraCommand::Jql { query }) => {
-            jira_jql(&query, limit, show_query).await
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::List {
+            project,
+            status,
+            assignee,
+            issue_type,
+            updated,
+        })) => {
+            let mut b = JqlBuilder::new();
+            if let Some(p) = project {
+                b = b.eq("project", &p);
+            }
+            if let Some(s) = status {
+                b = b.eq("status", &s);
+            }
+            if let Some(a) = assignee {
+                b = apply_assignee(b, &a);
+            }
+            if let Some(t) = issue_type {
+                b = b.eq("issuetype", &t);
+            }
+            if let Some(u) = updated {
+                b = b.raw(format!("updated >= {u}"));
+            }
+            b = b.order_by("updated DESC");
+            run_jql(&b.build(), limit, show_query).await
         }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Mine { status })) => {
+            let mut b = JqlBuilder::new().raw("assignee = currentUser()");
+            if let Some(s) = status {
+                b = b.eq("status", &s);
+            }
+            b = b.order_by("updated DESC");
+            run_jql(&b.build(), limit, show_query).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Search { terms, project })) => {
+            let mut b = JqlBuilder::new().contains("summary", &terms);
+            if let Some(p) = project {
+                b = b.eq("project", &p);
+            }
+            b = b.order_by("updated DESC");
+            run_jql(&b.build(), limit, show_query).await
+        }
+
+        Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
+
         Command::Conf(_) => {
             unreachable!("conf subcommands not yet implemented")
         }
+    }
+}
+
+fn apply_assignee(b: JqlBuilder, who: &str) -> JqlBuilder {
+    if who.eq_ignore_ascii_case("me") || who.eq_ignore_ascii_case("currentuser") {
+        b.raw("assignee = currentUser()")
+    } else {
+        b.eq("assignee", who)
     }
 }
 
@@ -27,8 +81,7 @@ fn config_show() -> Result<(), CliError> {
 }
 
 async fn config_test() -> Result<(), CliError> {
-    let cfg = Config::from_env()?;
-    let client = cfg.jira_client()?;
+    let client = jira_client()?;
     let me = jc_jira::users::myself(&client).await?;
     Envelope::new(serde_json::json!({
         "ok": true,
@@ -42,8 +95,7 @@ async fn config_test() -> Result<(), CliError> {
 }
 
 async fn jira_issue_get(key: &str) -> Result<(), CliError> {
-    let cfg = Config::from_env()?;
-    let client = cfg.jira_client()?;
+    let client = jira_client()?;
     let issue = jc_jira::issue::get(&client, key).await?;
 
     let description_markdown = issue
@@ -92,9 +144,8 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn jira_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliError> {
-    let cfg = Config::from_env()?;
-    let client = cfg.jira_client()?;
+async fn run_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliError> {
+    let client = jira_client()?;
     let hits = jc_jira::search::jql(&client, query, jc_jira::search::DEFAULT_FIELDS, limit).await?;
 
     let issues: Vec<_> = hits
@@ -123,4 +174,8 @@ async fn jira_jql(query: &str, limit: usize, show_query: bool) -> Result<(), Cli
     env.meta = Some(serde_json::Value::Object(meta));
     env.emit();
     Ok(())
+}
+
+fn jira_client() -> Result<Client, CliError> {
+    Ok(Config::from_env()?.jira_client()?)
 }

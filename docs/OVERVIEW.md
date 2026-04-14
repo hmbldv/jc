@@ -65,15 +65,13 @@ Cargo workspace, single binary, five crates:
 jc/
 ├── crates/
 │   ├── jc/         # binary: clap CLI, config, preview/dry-run, logging
-│   ├── jc-core/    # shared: reqwest client, auth, retry, errors, cache
+│   ├── jc-core/    # shared: reqwest client, auth, errors, cache
 │   ├── jc-adf/     # pure markdown <-> ADF converter
 │   ├── jc-jira/    # Jira Cloud REST v3 typed client
 │   └── jc-conf/    # Confluence Cloud REST v2 typed client
-├── docs/
-│   ├── CLAUDE.md       # pattern-oriented reference for Claude Code
-│   ├── OVERVIEW.md     # this file
-│   └── commands/       # per-command deep reference
-└── tests/fixtures/     # recorded HTTP responses for replay tests
+└── docs/
+    ├── CLAUDE.md       # pattern-oriented reference for Claude Code
+    └── OVERVIEW.md     # this file
 ```
 
 **Why workspace instead of single crate:**
@@ -109,23 +107,31 @@ Confluence Cloud has an even older format (XHTML-based "storage format") but
 the v2 API supports ADF via `body-format=atlas_doc_format`. That means **one
 markdown↔ADF converter can serve both products**.
 
-### Fidelity guarantees
+### Fidelity — what is implemented today
 
-| Element | Behavior |
-| --- | --- |
-| Paragraphs, headings, emphasis, lists | Full round-trip |
-| Links | Full round-trip; Jira-smart-link URLs preserved |
-| Code blocks | Full fidelity, language hints preserved |
-| GFM tables | Full round-trip, cell alignment preserved |
-| Table of contents | Detected and regenerated as ADF TOC node |
-| Inline images | Read as `![alt](attachment:name.png)` with sidecar attachment ID; write uploads first then references |
-| User mentions | `@user` → async lookup → ADF `mention` with accountId; ambiguous matches error with candidates |
-| Exotic nodes (panel, status, expand, layout, decisionList) | Rendered as fenced blocks with a type marker (e.g. ` ```adf:panel:info`) — lossless round-trip, nothing silently dropped |
-| Non-inline attachments | Surfaced in `warnings[]` with a hint to run `attachment list` |
+| Element | Read (ADF → md) | Write (md → ADF) |
+| --- | --- | --- |
+| Paragraphs, headings (H1–H6) | ✅ | ✅ |
+| Text marks (strong, em, code, strike) | ✅ | ✅ |
+| Links | ✅ | ✅ |
+| Bullet and ordered lists (with tight-list handling) | ✅ | ✅ |
+| Code blocks with language hints | ✅ | ✅ |
+| Blockquotes, horizontal rules, hard breaks | ✅ | ✅ |
+| `@user` mentions | ✅ (rendered as `@name`) | ➖ (emitted as plain text) |
+| `mediaSingle` images | ✅ (rendered as `![alt](attachment:ID)`) | ➖ (treated as links) |
+| `inlineCard`, `emoji` | ✅ | ➖ |
+| Exotic nodes (panel, status, expand, layout, decisionList, etc.) | ✅ via ` ```adf:<type>` escape hatch | ✅ via ` ```adf:<type>` escape hatch |
 
-The "nothing silently dropped" rule is non-negotiable. If the converter can't
-cleanly represent something, it escapes it to a fenced block and preserves
-the raw ADF verbatim. That is what the `adf:*` type markers are for.
+The "nothing silently dropped" rule is non-negotiable. When the converter
+can't cleanly represent a node, it escapes it to a fenced code block whose
+info string is `adf:<type>` and whose body is the raw ADF JSON. On the
+reverse trip, `adf:*` fenced blocks re-inflate verbatim, so exotic content
+round-trips losslessly even though explicit support hasn't been written.
+
+Not yet implemented on the write path: GFM tables, generated table of
+contents, typed user mentions (with async accountId lookup), and the
+inline-image upload pipeline. Callers that need any of those today can
+use the escape hatch.
 
 ## 5. The dry-run / preview model
 
@@ -150,18 +156,20 @@ an unreadable ADF tree diff.
 
 ## 6. Auth and config
 
-**Primary:** env vars — `JC_SITE`, `JC_EMAIL`, `JC_TOKEN`. Simplest to wire up
-for both Claude Code and CI.
+**Primary:** env vars — `JC_SITE`, `JC_EMAIL`, `JC_TOKEN`. Simplest to wire
+up for both Claude Code and CI.
 
-**Fallback:** OS keychain via the `keyring` crate. For interactive use without
-a `.env` file around.
+**Fallback:** OS keychain via the `keyring` crate (service `jc`, accounts
+`site` / `email` / `token`). Populate with `jc config set <key> <value>`.
+Env vars win when both are set. `jc config show` reports the sources it
+actually used so you can tell where credentials came from.
 
-**Verification:** `jc config test` calls `/rest/api/3/myself` and reports the
-authenticated user. Run this first in any new session.
+**Verification:** `jc config test` calls `/rest/api/3/myself` and reports
+the authenticated user. Run this first in any new session.
 
-**Single site only.** Multi-site / profile support is reserved (`--profile`
-flag exists in `--help`) but not implemented. When it becomes real, the
-config becomes a profiles map and every command takes `--profile`.
+**Single site only.** Multi-site / profile support is deferred. When it
+becomes real, the config becomes a profiles map and every command gains
+a `--profile` flag.
 
 ## 7. Integration story
 
@@ -190,12 +198,16 @@ binary would muddy the concerns and make both halves worse.
 
 ## 9. Testing strategy
 
-- **Unit tests** — exhaustive on `jc-adf` converters. Round-trip property
-  tests where feasible. Pure functions make this cheap.
-- **Recorded fixtures** — HTTP responses captured once, replayed in
-  integration tests for `jc-jira` and `jc-conf`. Lives in `tests/fixtures/`.
-- **Live integration tests** — deferred. Will run against a real sandbox
-  Atlassian site once a second machine is available for isolation.
+- **Unit tests today (41 total, all passing):**
+  - `jc-adf`: 25 tests covering to_adf, from_adf, round-trip, and the
+    `adf:<type>` escape hatch
+  - `jc-jira::jql`: 9 tests covering the JQL builder and string escaping
+  - `jc-jira::transitions`: 7 tests covering the fuzzy matcher's unique,
+    exact-wins-over-contains, ambiguous, and not-found branches
+- **Recorded fixtures** — planned. HTTP responses captured once, replayed
+  in integration tests for `jc-jira` and `jc-conf`.
+- **Live integration tests** — deferred until a second machine is
+  available to hit a real Atlassian sandbox site in isolation.
 
 ## 10. Toolchain
 
@@ -208,3 +220,7 @@ binary would muddy the concerns and make both halves worse.
 - `keyring` for OS keychain
 - `anyhow` at the binary boundary, `thiserror` in library crates
 - `tracing` + `tracing-subscriber` for the `--verbose` HTTP log
+- `similar` for unified-diff generation in edit previews
+- `dirs` for cache/config directory discovery
+- `bytes` for attachment download buffers
+- `url` for form encoding and URL parsing

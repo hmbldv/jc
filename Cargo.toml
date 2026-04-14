@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/jc",
+    "crates/jc-core",
+    "crates/jc-adf",
+    "crates/jc-jira",
+    "crates/jc-conf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["hmbldv"]
+license = "MIT"
+repository = "https://github.com/hmbldv/jc"
+
+[workspace.dependencies]
+# Internal
+jc-core = { path = "crates/jc-core" }
+jc-adf = { path = "crates/jc-adf" }
+jc-jira = { path = "crates/jc-jira" }
+jc-conf = { path = "crates/jc-conf" }
+
+# HTTP + async
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream", "gzip"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util"] }
+url = "2"
+bytes = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Markdown
+pulldown-cmark = { version = "0.12", default-features = false }
+
+# Secrets
+keyring = "3"
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Utility
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

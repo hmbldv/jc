@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared HTTP client, auth, retry, errors, and cache for jc"
+homepage.workspace = true
+authors.workspace = true
+description = "Shared HTTP client, auth, error parsing, and cache primitives for the jc CLI (Jira + Confluence)."
+keywords = ["jira", "confluence", "atlassian", "http", "client"]
+categories = ["api-bindings", "network-programming"]
 
 [dependencies]
 reqwest.workspace = true

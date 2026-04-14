@@ -11,12 +11,13 @@
 //! do `--dry-run` first, show the user, and re-run without the flag once the
 //! user approves.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::output::{CliError, Envelope};
+use crate::sanitize::sanitize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewMode {
@@ -101,15 +102,24 @@ impl Preview {
     /// Render the preview to stderr without prompting. Used by composite
     /// commands that stitch multiple previews together before asking for
     /// a single confirmation.
+    ///
+    /// All free-form string fields (`summary`, `url`, `diff`) are passed
+    /// through `sanitize()` before writing to stderr. Server-controlled
+    /// content can contain ANSI escape sequences; unsanitized writes to
+    /// a TTY let a hostile Jira comment rewrite the confirmation prompt.
     pub fn render_to_stderr(&self) -> Result<(), CliError> {
         if let Some(summary) = &self.summary {
-            eprintln!("# {summary}");
+            eprintln!("# {}", sanitize(summary));
         }
-        eprintln!("{} {}", self.method, self.url);
+        eprintln!("{} {}", sanitize(&self.method), sanitize(&self.url));
         if let Some(diff) = &self.diff {
-            eprintln!("\n--- diff ---\n{diff}");
+            eprintln!("\n--- diff ---\n{}", sanitize(diff));
         }
         if let Some(body) = &self.body {
+            // serde_json's string encoder already escapes control chars
+            // inside JSON strings, so this path is safe without extra
+            // sanitization — the output is structured JSON, not a free
+            // concatenation of server content.
             let rendered = serde_json::to_string_pretty(body)
                 .map_err(|e| CliError::validation(format!("serialize preview: {e}")))?;
             eprintln!("\n--- body ---\n{rendered}");
@@ -119,7 +129,18 @@ impl Preview {
 
     /// Confirm mode: render the preview to stderr and block on stdin.
     /// Returns `true` if the user typed `y`/`yes`, `false` otherwise.
+    ///
+    /// Errors immediately if stdin is not a terminal — a piped or closed
+    /// stdin would silently decline every prompt, which is a footgun
+    /// when `--confirm` is used in a wrapper script. `--dry-run` is the
+    /// correct non-interactive preview mode.
     pub fn confirm_interactive(&self) -> Result<bool, CliError> {
+        if !std::io::stdin().is_terminal() {
+            return Err(CliError::validation(
+                "--confirm requires an interactive terminal (stdin is not a tty); \
+                 use --dry-run for non-interactive previews",
+            ));
+        }
         eprintln!("--- preview ---");
         self.render_to_stderr()?;
         prompt_yes_no("Send? [y/N]: ")

@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Pure markdown <-> Atlassian Document Format converter"
+homepage.workspace = true
+authors.workspace = true
+description = "Pure markdown <-> Atlassian Document Format (ADF) converter. Lossless via an `adf:<type>` fenced-block escape hatch."
+keywords = ["adf", "atlassian", "markdown", "jira", "confluence"]
+categories = ["text-processing", "parsing"]
 
 [dependencies]
 serde.workspace = true

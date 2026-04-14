@@ -1,7 +1,9 @@
 use jc_core::{ApiError, Client, Result};
 use url::Url;
 
-const KEYRING_SERVICE: &str = "jc";
+/// Namespaced keyring service name. The `dev.hmbldv.jc` form is stable
+/// and unlikely to collide with another tool also claiming "jc".
+const KEYRING_SERVICE: &str = "dev.hmbldv.jc";
 
 /// Resolved runtime config. Populated from env vars first, keychain fallback.
 #[derive(Debug, Clone)]

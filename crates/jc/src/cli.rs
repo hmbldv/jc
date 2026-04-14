@@ -78,10 +78,11 @@ pub enum ConfigCommand {
     Test,
     /// Store a config value in the OS keychain.
     /// `key` must be one of: `site`, `email`, `token`.
+    /// Use `-` as the value to read from stdin (keeps secrets out of shell history).
     Set {
         /// Config key (site | email | token)
         key: String,
-        /// Value to store in the keychain
+        /// Value to store. Use `-` to read from stdin.
         value: String,
     },
 }

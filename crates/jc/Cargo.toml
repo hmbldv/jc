@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Jira + Confluence CLI designed for Claude Code consumption"
+homepage.workspace = true
+authors.workspace = true
+description = "Single-binary CLI for Jira Cloud and Confluence Cloud, designed for Claude Code consumption. JSON-first output, markdown-native input, dry-run preview on every mutation."
+keywords = ["jira", "confluence", "atlassian", "cli", "claude"]
+categories = ["command-line-utilities", "api-bindings"]
 
 [[bin]]
 name = "jc"

@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Confluence Cloud REST v2 typed client"
+homepage.workspace = true
+authors.workspace = true
+description = "Typed client for Confluence Cloud REST v2 — pages, spaces, attachments, and CQL search."
+keywords = ["confluence", "atlassian", "rest", "api", "client"]
+categories = ["api-bindings"]
 
 [dependencies]
 jc-core.workspace = true

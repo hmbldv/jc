@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use jc_core::Client;
+use jc_core::literal;
 use jc_jira::jql::JqlBuilder;
 use jc_jira::transitions::{self, MatchResult};
 use serde_json::{Value, json};
@@ -81,6 +82,13 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
                 b = b.eq("issuetype", &t);
             }
             if let Some(u) = updated {
+                if !literal::is_valid_relative_time(&u) {
+                    return Err(CliError::validation(format!(
+                        "invalid --updated value '{u}'. Expected a JQL relative \
+                         time expression like -7d, -24h, or 2w. For complex \
+                         time filters use `jc jira jql` directly."
+                    )));
+                }
                 b = b.raw(format!("updated >= {u}"));
             }
             b = b.order_by("updated DESC");
@@ -242,7 +250,27 @@ fn config_set(key: &str, value: &str) -> Result<(), CliError> {
             allowed.join(", ")
         )));
     }
-    crate::config::write_keychain(key, value)?;
+
+    // A literal "-" means "read the value from stdin". This keeps secrets
+    // out of argv — which gets captured by shell history, ps output, and
+    // sometimes logged by the OS — while still supporting the friendly
+    // `jc config set token <value>` form for quick setup.
+    let actual_value: String = if value == "-" {
+        use std::io::Read as _;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::io(format!("read stdin: {e}")))?;
+        let trimmed = buf.trim_end_matches(['\r', '\n']).to_string();
+        if trimmed.is_empty() {
+            return Err(CliError::validation("stdin was empty"));
+        }
+        trimmed
+    } else {
+        value.to_string()
+    };
+
+    crate::config::write_keychain(key, &actual_value)?;
     Envelope::new(json!({
         "key": key,
         "stored": true,
@@ -622,11 +650,7 @@ async fn jira_attachment_get(id: &str, out_dir: &Path) -> Result<(), CliError> {
     let meta = jc_jira::attachments::get_meta(&client, id).await?;
     let blob = jc_jira::attachments::download(&client, id).await?;
 
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| CliError::io(format!("mkdir {}: {e}", out_dir.display())))?;
-    let path = out_dir.join(&meta.filename);
-    std::fs::write(&path, &blob.bytes)
-        .map_err(|e| CliError::io(format!("write {}: {e}", path.display())))?;
+    let path = safe_write(out_dir, &meta.filename, &blob.bytes)?;
 
     let mime = blob.content_type.clone().or(meta.mime_type.clone());
     let warning = unreadable_mime_warning(mime.as_deref());
@@ -643,6 +667,64 @@ async fn jira_attachment_get(id: &str, out_dir: &Path) -> Result<(), CliError> {
     }
     env.emit();
     Ok(())
+}
+
+/// Write `bytes` under `out_dir` using a server-supplied `filename`,
+/// defending against path traversal and symlink-follow attacks.
+///
+/// 1. Extract only the final path component (`Path::file_name`) — rejects
+///    `../` traversal even if the server supplied a multi-segment path.
+/// 2. Reject reserved names (`.`, `..`, empty).
+/// 3. Refuse to overwrite an existing file that is a symlink, so a
+///    pre-planted symlink at the target can't be used to write outside
+///    `out_dir` or clobber arbitrary files.
+fn safe_write(out_dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf, CliError> {
+    // Strip the path to just the file component. This defangs
+    // "../../etc/passwd", "foo/bar.txt", "C:\\windows\\...", etc.
+    let raw_name = Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            CliError::validation(format!(
+                "server returned unsafe filename: {filename:?}"
+            ))
+        })?;
+
+    if raw_name.is_empty() || raw_name == "." || raw_name == ".." {
+        return Err(CliError::validation(format!(
+            "server returned reserved filename: {raw_name:?}"
+        )));
+    }
+
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| CliError::io(format!("mkdir {}: {e}", out_dir.display())))?;
+
+    let path = out_dir.join(raw_name);
+
+    // If the target already exists as a symlink, refuse — an attacker
+    // could have pre-planted one pointing at an arbitrary file.
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(CliError::validation(format!(
+            "refusing to write through existing symlink: {}",
+            path.display()
+        )));
+    }
+
+    // Use OpenOptions with truncate/create rather than fs::write so the
+    // behavior is explicit and auditable.
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| CliError::io(format!("open {}: {e}", path.display())))?;
+    file.write_all(bytes)
+        .map_err(|e| CliError::io(format!("write {}: {e}", path.display())))?;
+
+    Ok(path)
 }
 
 fn unreadable_mime_warning(mime: Option<&str>) -> Option<String> {
@@ -813,12 +895,12 @@ async fn conf_page_search(
     limit: usize,
     show_query: bool,
 ) -> Result<(), CliError> {
-    // Compile a small CQL expression from --terms and --space.
-    // CQL string literals use double quotes; escape any embedded quotes.
-    let escaped = terms.replace('"', "\\\"");
-    let mut query = format!("type = \"page\" AND text ~ \"{escaped}\"");
+    // CQL shares JQL's string literal grammar: `literal::escape_string`
+    // correctly handles both backslashes and double quotes (the previous
+    // inline replace handled only `"`, leaving a backslash-injection hole).
+    let mut query = format!("type = \"page\" AND text ~ {}", literal::escape_string(terms));
     if let Some(s) = space {
-        query.push_str(&format!(" AND space = \"{}\"", s.replace('"', "\\\"")));
+        query.push_str(&format!(" AND space = {}", literal::escape_string(s)));
     }
     run_cql(&query, limit, show_query).await
 }
@@ -1379,11 +1461,7 @@ async fn conf_attachment_get(id: &str, out_dir: &Path) -> Result<(), CliError> {
     let client = jira_client()?;
     let (meta_rec, blob) = jc_conf::attachments::download(&client, id).await?;
 
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| CliError::io(format!("mkdir {}: {e}", out_dir.display())))?;
-    let path = out_dir.join(&meta_rec.title);
-    std::fs::write(&path, &blob.bytes)
-        .map_err(|e| CliError::io(format!("write {}: {e}", path.display())))?;
+    let path = safe_write(out_dir, &meta_rec.title, &blob.bytes)?;
 
     let mime = blob.content_type.clone().or(meta_rec.media_type.clone());
     let warning = unreadable_mime_warning(mime.as_deref());

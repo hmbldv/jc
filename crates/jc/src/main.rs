@@ -6,6 +6,7 @@ mod config;
 mod logging;
 mod output;
 mod preview;
+mod sanitize;
 
 #[tokio::main]
 async fn main() -> ExitCode {

@@ -3,21 +3,10 @@
 //! escape hatch; this module exists so the friendly wrappers produce correct,
 //! safely-escaped queries.
 
-/// Escape a user-supplied string for use as a JQL literal. Wraps in double
-/// quotes and backslash-escapes `\` and `"` per Atlassian JQL grammar.
-pub fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
+/// Escape a user-supplied string for use as a JQL literal. Re-exported from
+/// [`jc_core::literal::escape_string`] so JQL and CQL share the same
+/// implementation (they have identical literal grammars).
+pub use jc_core::literal::escape_string;
 
 #[derive(Debug, Default)]
 pub struct JqlBuilder {
@@ -71,21 +60,6 @@ impl JqlBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escape_plain() {
-        assert_eq!(escape_string("hello"), "\"hello\"");
-    }
-
-    #[test]
-    fn escape_with_quote() {
-        assert_eq!(escape_string(r#"he said "hi""#), r#""he said \"hi\"""#);
-    }
-
-    #[test]
-    fn escape_with_backslash() {
-        assert_eq!(escape_string(r"path\to\thing"), r#""path\\to\\thing""#);
-    }
 
     #[test]
     fn build_empty() {

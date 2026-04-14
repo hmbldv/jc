@@ -26,6 +26,8 @@ pub mod to_adf;
 pub mod toc;
 pub mod unknown;
 
-/// Placeholder for the ADF document root node.
-/// Full type tree lands with the first real converter pass.
+/// ADF is kept as `serde_json::Value` internally. That keeps the converter
+/// small and trivially extensible — new node types are one match arm away.
 pub type AdfDocument = serde_json::Value;
+
+pub use from_adf::to_markdown;

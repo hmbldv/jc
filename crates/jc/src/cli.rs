@@ -60,7 +60,18 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum JiraCommand {
-    // Populated as endpoints land. `issue get` is the first planned command.
+    /// Issue-level operations.
+    #[command(subcommand)]
+    Issue(JiraIssueCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraIssueCommand {
+    /// Fetch an issue by key, with description rendered as markdown.
+    Get {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

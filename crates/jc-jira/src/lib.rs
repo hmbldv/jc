@@ -10,5 +10,6 @@
 //! - `users` — /myself, user search (powers mention resolution)
 //! - `types` — shared request/response types
 
+pub mod issue;
 pub mod types;
 pub mod users;

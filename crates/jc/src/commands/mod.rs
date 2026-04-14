@@ -8,7 +8,7 @@ use similar::TextDiff;
 
 use crate::cli::{
     Cli, Command, ConfCommand, ConfPageCommand, ConfSpaceCommand, ConfigCommand,
-    JiraAttachmentCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
+    FieldsSubcommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
@@ -25,6 +25,38 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
 
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Get { key })) => {
             jira_issue_get(&key).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Create {
+            project,
+            issue_type,
+            summary,
+            description_file,
+            fields,
+        })) => {
+            jira_issue_create(
+                &project,
+                &issue_type,
+                &summary,
+                description_file.as_deref(),
+                &fields,
+                mode,
+            )
+            .await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Edit {
+            key,
+            summary,
+            description_file,
+            fields,
+        })) => {
+            jira_issue_edit(
+                &key,
+                summary.as_deref(),
+                description_file.as_deref(),
+                &fields,
+                mode,
+            )
+            .await
         }
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::List {
             project,
@@ -99,6 +131,9 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         ))) => jira_attachment_upload(&key, &file, mode).await,
 
         Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
+        Command::Jira(JiraCommand::Fields(fields_cmd)) => match fields_cmd.command {
+            FieldsSubcommand::Sync => jira_fields_sync().await,
+        },
 
         Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => {
             conf_page_get(&id).await
@@ -981,6 +1016,184 @@ async fn run_cql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
     }
     env.meta = Some(Value::Object(meta));
     env.emit();
+    Ok(())
+}
+
+async fn jira_fields_sync() -> Result<(), CliError> {
+    let client = jira_client()?;
+    let fields = jc_jira::fields::list_all(&client).await?;
+    let cache = jc_jira::fields::FieldsCache { fields };
+    let path = cache
+        .save()
+        .map_err(|e| CliError::io(format!("write fields cache: {e}")))?;
+
+    Envelope::new(json!({
+        "path": path.display().to_string(),
+        "field_count": cache.fields.len(),
+    }))
+    .emit();
+    Ok(())
+}
+
+fn build_fields_object(
+    cache: &jc_jira::fields::FieldsCache,
+    pairs: &[String],
+    extras: serde_json::Map<String, Value>,
+) -> Result<Value, CliError> {
+    let mut obj = extras;
+    for pair in pairs {
+        let (raw_key, raw_val) = pair.split_once('=').ok_or_else(|| {
+            CliError::validation(format!(
+                "invalid --field '{pair}' (expected KEY=VALUE)"
+            ))
+        })?;
+        let key = raw_key.trim();
+        let resolved = cache
+            .resolve_id(key)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| key.to_string());
+        let value: Value = serde_json::from_str(raw_val)
+            .unwrap_or_else(|_| Value::String(raw_val.to_string()));
+        obj.insert(resolved, value);
+    }
+    Ok(Value::Object(obj))
+}
+
+async fn jira_issue_create(
+    project: &str,
+    issue_type: &str,
+    summary: &str,
+    description_file: Option<&Path>,
+    extra_fields: &[String],
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let cache = jc_jira::fields::FieldsCache::load();
+
+    let mut base = serde_json::Map::new();
+    base.insert("project".into(), json!({ "key": project }));
+    base.insert("issuetype".into(), json!({ "name": issue_type }));
+    base.insert("summary".into(), json!(summary));
+
+    if let Some(path) = description_file {
+        let md = std::fs::read_to_string(path)
+            .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+        base.insert("description".into(), jc_adf::to_adf(&md));
+    }
+
+    let fields_obj = build_fields_object(&cache, extra_fields, base)?;
+
+    let preview = Preview::new(
+        "POST",
+        format!("https://{}/rest/api/3/issue", cfg.site),
+    )
+    .with_body(json!({ "fields": fields_obj }))
+    .with_summary(format!(
+        "Create {issue_type} in {project}: {summary}"
+    ));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let created = jc_jira::issue::create(&client, &fields_obj).await?;
+    Envelope::new(json!({
+        "id": created.id,
+        "key": created.key,
+        "url": format!("https://{}/browse/{}", cfg.site, created.key),
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn jira_issue_edit(
+    key: &str,
+    summary: Option<&str>,
+    description_file: Option<&Path>,
+    extra_fields: &[String],
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    if summary.is_none() && description_file.is_none() && extra_fields.is_empty() {
+        return Err(CliError::validation(
+            "at least one of --summary, --description-file, or --field is required",
+        ));
+    }
+
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let cache = jc_jira::fields::FieldsCache::load();
+
+    let mut base = serde_json::Map::new();
+    if let Some(s) = summary {
+        base.insert("summary".into(), json!(s));
+    }
+
+    let mut new_description_markdown: Option<String> = None;
+    if let Some(path) = description_file {
+        let md = std::fs::read_to_string(path)
+            .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+        let adf = jc_adf::to_adf(&md);
+        new_description_markdown = Some(jc_adf::to_markdown(&adf));
+        base.insert("description".into(), adf);
+    }
+
+    let fields_obj = build_fields_object(&cache, extra_fields, base)?;
+
+    // Fetch current issue for diff (if description is being changed).
+    let diff = if new_description_markdown.is_some() {
+        let current = jc_jira::issue::get(&client, key).await.ok();
+        let current_md = current
+            .as_ref()
+            .and_then(|i| i.fields.description.as_ref())
+            .map(jc_adf::to_markdown)
+            .unwrap_or_default();
+        Some(unified_diff(
+            &current_md,
+            new_description_markdown.as_deref().unwrap_or(""),
+        ))
+    } else {
+        None
+    };
+
+    let url = format!("https://{}/rest/api/3/issue/{}", cfg.site, key);
+    let mut preview = Preview::new("PUT", url)
+        .with_body(json!({ "fields": fields_obj }))
+        .with_summary(format!("Edit {key}"));
+    if let Some(d) = diff {
+        preview = preview.with_diff(d);
+    }
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    jc_jira::issue::edit(&client, key, &fields_obj).await?;
+    Envelope::new(json!({
+        "edited": true,
+        "key": key,
+    }))
+    .emit();
     Ok(())
 }
 

@@ -110,6 +110,25 @@ impl Client {
         parse_empty(resp).await
     }
 
+    /// PUT a JSON body for an endpoint that returns 204 No Content
+    /// (e.g. issue edit).
+    pub async fn put_no_content<B>(&self, path: &str, body: &B) -> Result<()>
+    where
+        B: Serialize + ?Sized,
+    {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .put(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_empty(resp).await
+    }
+
     /// DELETE an endpoint that returns 204 No Content.
     pub async fn delete_no_content(&self, path: &str) -> Result<()> {
         let url = self.base.join(path).map_err(ApiError::url)?;

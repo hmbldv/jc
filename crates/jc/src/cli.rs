@@ -89,6 +89,21 @@ pub enum JiraCommand {
         /// The JQL query to execute.
         query: String,
     },
+
+    /// Refresh the local custom-field cache.
+    Fields(FieldsCommand),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct FieldsCommand {
+    #[command(subcommand)]
+    pub command: FieldsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FieldsSubcommand {
+    /// Fetch the full field catalog and write it to ~/.cache/jc/fields.json
+    Sync,
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,6 +112,41 @@ pub enum JiraIssueCommand {
     Get {
         /// Issue key, e.g. FOO-123
         key: String,
+    },
+
+    /// Create a new issue.
+    Create {
+        /// Project key (e.g. FOO)
+        #[arg(long)]
+        project: String,
+        /// Issue type name (e.g. Bug, Story)
+        #[arg(long = "type")]
+        issue_type: String,
+        /// Summary (title)
+        #[arg(long)]
+        summary: String,
+        /// Optional path to markdown file for the description
+        #[arg(long = "description-file")]
+        description_file: Option<PathBuf>,
+        /// Additional fields as KEY=VALUE (human name or customfield_ID).
+        /// VALUE is parsed as JSON if possible, otherwise treated as string.
+        #[arg(long = "field", value_name = "KEY=VALUE")]
+        fields: Vec<String>,
+    },
+
+    /// Edit an existing issue.
+    Edit {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// New summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Path to markdown file for the new description
+        #[arg(long = "description-file")]
+        description_file: Option<PathBuf>,
+        /// Additional fields as KEY=VALUE
+        #[arg(long = "field", value_name = "KEY=VALUE")]
+        fields: Vec<String>,
     },
 
     /// List issues matching the given filters. Filters AND together.

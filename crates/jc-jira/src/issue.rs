@@ -91,3 +91,30 @@ pub async fn get(client: &Client, key: &str) -> Result<Issue> {
     let path = format!("rest/api/3/issue/{key}?fields=*all");
     client.request_json(Method::GET, &path).await
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CreateResult {
+    pub id: String,
+    pub key: String,
+    #[serde(default, rename = "self")]
+    pub self_url: Option<String>,
+}
+
+/// POST /rest/api/3/issue
+///
+/// `fields` is the `fields` object that will be wrapped inside the request
+/// envelope — callers should populate custom fields with their resolved
+/// `customfield_XXXXX` IDs.
+pub async fn create(client: &Client, fields: &Value) -> Result<CreateResult> {
+    let body = serde_json::json!({ "fields": fields });
+    client.post_json("rest/api/3/issue", &body).await
+}
+
+/// PUT /rest/api/3/issue/{key}
+///
+/// Returns 204 No Content on success. Same `fields` shape as `create`.
+pub async fn edit(client: &Client, key: &str, fields: &Value) -> Result<()> {
+    let path = format!("rest/api/3/issue/{key}");
+    let body = serde_json::json!({ "fields": fields });
+    client.put_no_content(&path, &body).await
+}

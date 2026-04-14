@@ -49,7 +49,25 @@ pub enum Command {
     /// Confluence Cloud operations.
     #[command(subcommand)]
     Conf(ConfCommand),
-    // publish lands once page create + jira comment add are implemented.
+
+    /// Publish a markdown file as a Confluence page, optionally linking
+    /// it from a Jira issue in the same step.
+    Publish {
+        /// Path to the markdown file to publish
+        file: PathBuf,
+        /// Space key (e.g. ENG)
+        #[arg(long)]
+        space: String,
+        /// Page title
+        #[arg(long)]
+        title: String,
+        /// Optional parent page ID
+        #[arg(long)]
+        parent: Option<String>,
+        /// Optional Jira issue key to post a linking comment on
+        #[arg(long = "link-to")]
+        link_to: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

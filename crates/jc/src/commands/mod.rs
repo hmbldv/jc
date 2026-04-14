@@ -12,7 +12,7 @@ use crate::cli::{
 };
 use crate::config::Config;
 use crate::output::{CliError, Envelope};
-use crate::preview::{Preview, PreviewMode};
+use crate::preview::{Preview, PreviewMode, emit_composite_dry_run, prompt_yes_no};
 
 pub async fn dispatch(args: Cli) -> Result<(), CliError> {
     let limit = args.limit;
@@ -134,6 +134,24 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         }
         Command::Conf(ConfCommand::Cql { query }) => {
             run_cql(&query, limit, show_query).await
+        }
+
+        Command::Publish {
+            file,
+            space,
+            title,
+            parent,
+            link_to,
+        } => {
+            publish(
+                &file,
+                &space,
+                &title,
+                parent.as_deref(),
+                link_to.as_deref(),
+                mode,
+            )
+            .await
         }
     }
 }
@@ -962,6 +980,137 @@ async fn run_cql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
         meta.insert("query".into(), json!(query));
     }
     env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn publish(
+    body_file: &Path,
+    space_key: &str,
+    title: &str,
+    parent: Option<&str>,
+    link_to: Option<&str>,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", body_file.display())))?;
+    if md.trim().is_empty() {
+        return Err(CliError::validation(format!(
+            "body file {} is empty",
+            body_file.display()
+        )));
+    }
+    let adf = jc_adf::to_adf(&md);
+
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let space_id = jc_conf::space::resolve_id(&client, space_key).await?;
+
+    // Step 1: Confluence create page
+    let page_req = jc_conf::page::CreatePageRequest {
+        space_id: &space_id,
+        status: "current",
+        title,
+        parent_id: parent,
+        body: jc_conf::page::BodyRequest::from_adf(&adf),
+    };
+    let page_preview = Preview::new("POST", format!("https://{}/wiki/api/v2/pages", cfg.site))
+        .with_body(serde_json::to_value(&page_req).unwrap_or_else(|_| json!(null)))
+        .with_summary(format!("Create page '{title}' in space {space_key}"));
+
+    // Step 2: Jira comment (optional) — templated since real page URL is
+    // only known after create succeeds.
+    let link_preview = link_to.map(|issue_key| {
+        let template_url = format!(
+            "https://{}/wiki/spaces/{}/pages/<NEW_PAGE_ID>",
+            cfg.site, space_key
+        );
+        let template_md = format!("Published to Confluence: [{title}]({template_url})\n");
+        let comment_adf = jc_adf::to_adf(&template_md);
+        Preview::new(
+            "POST",
+            format!("https://{}/rest/api/3/issue/{}/comment", cfg.site, issue_key),
+        )
+        .with_body(json!({ "body": comment_adf }))
+        .with_summary(format!("Link published page in Jira issue {issue_key}"))
+    });
+
+    match mode {
+        PreviewMode::DryRun => {
+            let mut previews = vec![page_preview];
+            if let Some(lp) = link_preview {
+                previews.push(lp);
+            }
+            emit_composite_dry_run(&previews);
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            let total = 1 + link_preview.as_ref().map_or(0, |_| 1);
+            eprintln!("--- publish preview ---");
+            eprintln!("\n# Step 1 of {total}: Confluence page creation");
+            page_preview.render_to_stderr()?;
+            if let Some(lp) = &link_preview {
+                eprintln!("\n# Step 2 of {total}: Jira linking comment");
+                lp.render_to_stderr()?;
+                eprintln!(
+                    "\nNote: <NEW_PAGE_ID> in the comment body will be substituted \
+                     with the real page ID after step 1 succeeds."
+                );
+            }
+            if !prompt_yes_no("Send all? [y/N]: ")? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    // Execute step 1
+    let page = jc_conf::page::create(&client, &page_req).await?;
+    let page_url = format!(
+        "https://{}/wiki/spaces/{}/pages/{}",
+        cfg.site, space_key, page.id
+    );
+
+    let mut data = json!({
+        "page": {
+            "id": page.id,
+            "title": page.title,
+            "space_id": page.space_id,
+            "parent_id": page.parent_id,
+            "version": page.version.as_ref().map(|v| v.number),
+            "url": page_url,
+        },
+        "comment": Value::Null,
+    });
+
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Execute step 2 if requested. Partial failure surfaces as a warning
+    // rather than a hard error — the page is already created and linking
+    // it can be retried manually.
+    if let Some(issue_key) = link_to {
+        let real_md = format!("Published to Confluence: [{title}]({page_url})\n");
+        let comment_adf = jc_adf::to_adf(&real_md);
+        match jc_jira::comment::add(&client, issue_key, &comment_adf).await {
+            Ok(c) => {
+                data["comment"] = json!({
+                    "id": c.id,
+                    "issue": issue_key,
+                    "created": c.created,
+                });
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "page {} created successfully but linking comment on {issue_key} failed: {e}",
+                    page.id
+                ));
+            }
+        }
+    }
+
+    let mut env = Envelope::new(data);
+    env.warnings = warnings;
     env.emit();
     Ok(())
 }

@@ -98,10 +98,10 @@ impl Preview {
         env.emit();
     }
 
-    /// Confirm mode: render the preview to stderr and block on stdin.
-    /// Returns `true` if the user typed `y`/`yes`, `false` otherwise.
-    pub fn confirm_interactive(&self) -> Result<bool, CliError> {
-        eprintln!("--- preview ---");
+    /// Render the preview to stderr without prompting. Used by composite
+    /// commands that stitch multiple previews together before asking for
+    /// a single confirmation.
+    pub fn render_to_stderr(&self) -> Result<(), CliError> {
         if let Some(summary) = &self.summary {
             eprintln!("# {summary}");
         }
@@ -114,15 +114,45 @@ impl Preview {
                 .map_err(|e| CliError::validation(format!("serialize preview: {e}")))?;
             eprintln!("\n--- body ---\n{rendered}");
         }
-        eprint!("\nSend? [y/N]: ");
-        std::io::stderr().flush().ok();
-
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| CliError::io(format!("read stdin: {e}")))?;
-        let answer = line.trim();
-        Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+        Ok(())
     }
+
+    /// Confirm mode: render the preview to stderr and block on stdin.
+    /// Returns `true` if the user typed `y`/`yes`, `false` otherwise.
+    pub fn confirm_interactive(&self) -> Result<bool, CliError> {
+        eprintln!("--- preview ---");
+        self.render_to_stderr()?;
+        prompt_yes_no("Send? [y/N]: ")
+    }
+}
+
+/// Emit a composite dry-run envelope containing multiple planned requests.
+pub fn emit_composite_dry_run(previews: &[Preview]) {
+    let previews_json: Vec<Value> = previews
+        .iter()
+        .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+        .collect();
+    let data = json!({
+        "previews": previews_json,
+        "will_send": false,
+    });
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("mode".into(), json!("dry_run"));
+    meta.insert("step_count".into(), json!(previews.len()));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+}
+
+/// Prompt on stderr and read a single y/N answer from stdin.
+pub fn prompt_yes_no(prompt: &str) -> Result<bool, CliError> {
+    eprint!("\n{prompt}");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| CliError::io(format!("read stdin: {e}")))?;
+    let answer = line.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }

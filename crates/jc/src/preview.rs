@@ -50,6 +50,9 @@ pub struct Preview {
     pub body: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Unified diff against current remote state, for edit operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 impl Preview {
@@ -64,6 +67,7 @@ impl Preview {
             headers,
             body: None,
             summary: None,
+            diff: None,
         }
     }
 
@@ -74,6 +78,11 @@ impl Preview {
 
     pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
         self.summary = Some(summary.into());
+        self
+    }
+
+    pub fn with_diff(mut self, diff: String) -> Self {
+        self.diff = Some(diff);
         self
     }
 
@@ -92,11 +101,20 @@ impl Preview {
     /// Confirm mode: render the preview to stderr and block on stdin.
     /// Returns `true` if the user typed `y`/`yes`, `false` otherwise.
     pub fn confirm_interactive(&self) -> Result<bool, CliError> {
-        let rendered = serde_json::to_string_pretty(self)
-            .map_err(|e| CliError::validation(format!("serialize preview: {e}")))?;
         eprintln!("--- preview ---");
-        eprintln!("{rendered}");
-        eprint!("Send? [y/N]: ");
+        if let Some(summary) = &self.summary {
+            eprintln!("# {summary}");
+        }
+        eprintln!("{} {}", self.method, self.url);
+        if let Some(diff) = &self.diff {
+            eprintln!("\n--- diff ---\n{diff}");
+        }
+        if let Some(body) = &self.body {
+            let rendered = serde_json::to_string_pretty(body)
+                .map_err(|e| CliError::validation(format!("serialize preview: {e}")))?;
+            eprintln!("\n--- body ---\n{rendered}");
+        }
+        eprint!("\nSend? [y/N]: ");
         std::io::stderr().flush().ok();
 
         let mut line = String::new();

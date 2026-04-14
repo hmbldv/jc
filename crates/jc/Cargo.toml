@@ -33,3 +33,4 @@ tracing-subscriber.workspace = true
 
 keyring.workspace = true
 dirs.workspace = true
+similar.workspace = true

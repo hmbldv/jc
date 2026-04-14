@@ -14,5 +14,6 @@ pub mod comment;
 pub mod issue;
 pub mod jql;
 pub mod search;
+pub mod transitions;
 pub mod types;
 pub mod users;

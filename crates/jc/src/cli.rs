@@ -119,6 +119,15 @@ pub enum JiraIssueCommand {
     /// Comment operations.
     #[command(subcommand)]
     Comment(JiraCommentCommand),
+
+    /// Transition an issue to another workflow state.
+    Transition {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Target status name (fuzzy-matched against available transitions)
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,6 +140,32 @@ pub enum JiraCommentCommand {
         /// Path to a markdown file containing the comment body
         #[arg(long = "body-file")]
         body_file: PathBuf,
+    },
+
+    /// List comments on an issue, bodies rendered as markdown.
+    List {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+
+    /// Replace a comment's body. Shows a diff against the current remote
+    /// state in the preview.
+    Edit {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Comment ID to edit
+        comment_id: String,
+        /// Path to a markdown file containing the new body
+        #[arg(long = "body-file")]
+        body_file: PathBuf,
+    },
+
+    /// Delete a comment.
+    Delete {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Comment ID to delete
+        comment_id: String,
     },
 }
 

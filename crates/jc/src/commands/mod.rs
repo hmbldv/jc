@@ -2,7 +2,9 @@ use std::path::Path;
 
 use jc_core::Client;
 use jc_jira::jql::JqlBuilder;
+use jc_jira::transitions::{self, MatchResult};
 use serde_json::{Value, json};
+use similar::TextDiff;
 
 use crate::cli::{
     Cli, Command, ConfigCommand, JiraCommand, JiraCommentCommand, JiraIssueCommand,
@@ -68,6 +70,23 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
             JiraCommentCommand::Add { key, body_file },
         ))) => jira_comment_add(&key, &body_file, mode).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
+            JiraCommentCommand::List { key },
+        ))) => jira_comment_list(&key, limit).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
+            JiraCommentCommand::Edit {
+                key,
+                comment_id,
+                body_file,
+            },
+        ))) => jira_comment_edit(&key, &comment_id, &body_file, mode).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
+            JiraCommentCommand::Delete { key, comment_id },
+        ))) => jira_comment_delete(&key, &comment_id, mode).await,
+
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Transition { key, to })) => {
+            jira_issue_transition(&key, &to, mode).await
+        }
 
         Command::Jira(JiraCommand::Jql { query }) => run_jql(&query, limit, show_query).await,
 
@@ -236,6 +255,213 @@ async fn jira_comment_add(
     }))
     .emit();
     Ok(())
+}
+
+async fn jira_comment_list(key: &str, limit: usize) -> Result<(), CliError> {
+    let client = jira_client()?;
+    let comments = jc_jira::comment::list(&client, key, limit).await?;
+
+    let data: Vec<_> = comments
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "author": c.author.as_ref().map(|u| &u.display_name),
+                "created": c.created,
+                "updated": c.updated,
+                "body_markdown": c.body.as_ref().map(jc_adf::to_markdown),
+            })
+        })
+        .collect();
+
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("count".into(), json!(comments.len()));
+    meta.insert("issue".into(), json!(key));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+async fn jira_comment_edit(
+    key: &str,
+    comment_id: &str,
+    body_file: &Path,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", body_file.display())))?;
+    if md.trim().is_empty() {
+        return Err(CliError::validation(format!(
+            "body file {} is empty",
+            body_file.display()
+        )));
+    }
+    let new_adf = jc_adf::to_adf(&md);
+    let new_markdown = jc_adf::to_markdown(&new_adf);
+
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+
+    // Fetch current state for the diff preview.
+    let current = jc_jira::comment::get(&client, key, comment_id).await?;
+    let current_markdown = current
+        .body
+        .as_ref()
+        .map(jc_adf::to_markdown)
+        .unwrap_or_default();
+
+    let diff = unified_diff(&current_markdown, &new_markdown);
+
+    let url = format!(
+        "https://{}/rest/api/3/issue/{}/comment/{}",
+        cfg.site, key, comment_id
+    );
+    let preview = Preview::new("PUT", url)
+        .with_body(json!({ "body": new_adf }))
+        .with_summary(format!("Edit comment {comment_id} on {key}"))
+        .with_diff(diff);
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let updated = jc_jira::comment::edit(&client, key, comment_id, &new_adf).await?;
+    Envelope::new(json!({
+        "id": updated.id,
+        "updated": updated.updated,
+        "author": updated.author.as_ref().map(|u| &u.display_name),
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn jira_comment_delete(
+    key: &str,
+    comment_id: &str,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let url = format!(
+        "https://{}/rest/api/3/issue/{}/comment/{}",
+        cfg.site, key, comment_id
+    );
+    let preview = Preview::new("DELETE", url)
+        .with_summary(format!("Delete comment {comment_id} on {key}"));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    let client = cfg.jira_client()?;
+    jc_jira::comment::delete(&client, key, comment_id).await?;
+    Envelope::new(json!({
+        "deleted": true,
+        "id": comment_id,
+        "issue": key,
+    }))
+    .emit();
+    Ok(())
+}
+
+async fn jira_issue_transition(
+    key: &str,
+    target: &str,
+    mode: PreviewMode,
+) -> Result<(), CliError> {
+    let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+
+    let available = transitions::list(&client, key).await?;
+    let matched = match transitions::find_match(&available, target) {
+        MatchResult::Unique(t) => t,
+        MatchResult::Ambiguous(cands) => {
+            let names: Vec<&str> = cands.iter().map(|t| t.name.as_str()).collect();
+            return Err(CliError::validation(format!(
+                "transition '{target}' is ambiguous: {}",
+                names.join(", ")
+            )));
+        }
+        MatchResult::NotFound => {
+            let names: Vec<&str> = available.iter().map(|t| t.name.as_str()).collect();
+            return Err(CliError::validation(format!(
+                "no transition matches '{target}'. available: {}",
+                if names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )));
+        }
+    };
+
+    let url = format!("https://{}/rest/api/3/issue/{}/transitions", cfg.site, key);
+    let preview = Preview::new("POST", url)
+        .with_body(json!({
+            "transition": { "id": matched.id, "name": matched.name }
+        }))
+        .with_summary(format!("Transition {key} -> {}", matched.name));
+
+    match mode {
+        PreviewMode::DryRun => {
+            preview.emit_dry_run();
+            return Ok(());
+        }
+        PreviewMode::Confirm => {
+            if !preview.confirm_interactive()? {
+                emit_cancelled();
+                return Ok(());
+            }
+        }
+        PreviewMode::Send => {}
+    }
+
+    transitions::execute(&client, key, &matched.id).await?;
+    Envelope::new(json!({
+        "transitioned": true,
+        "issue": key,
+        "transition_id": matched.id,
+        "to": matched.name,
+        "to_status": matched.to.as_ref().map(|t| &t.name),
+    }))
+    .emit();
+    Ok(())
+}
+
+fn emit_cancelled() {
+    let mut env = Envelope::new(json!({ "cancelled": true }));
+    let mut meta = serde_json::Map::new();
+    meta.insert("mode".into(), json!("confirm"));
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+}
+
+fn unified_diff(before: &str, after: &str) -> String {
+    TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header("before", "after")
+        .to_string()
 }
 
 fn jira_client() -> Result<Client, CliError> {

@@ -62,6 +62,68 @@ impl Client {
             .map_err(ApiError::transport)?;
         parse_response(resp).await
     }
+
+    /// PUT a JSON body and parse a JSON response.
+    pub async fn put_json<B, T>(&self, path: &str, body: &B) -> Result<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .put(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_response(resp).await
+    }
+
+    /// POST a JSON body for an endpoint that returns 204 No Content
+    /// (e.g. issue transitions).
+    pub async fn post_no_content<B>(&self, path: &str, body: &B) -> Result<()>
+    where
+        B: Serialize + ?Sized,
+    {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .post(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_empty(resp).await
+    }
+
+    /// DELETE an endpoint that returns 204 No Content.
+    pub async fn delete_no_content(&self, path: &str) -> Result<()> {
+        let url = self.base.join(path).map_err(ApiError::url)?;
+        let resp = self
+            .http
+            .delete(url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(ApiError::transport)?;
+        parse_empty(resp).await
+    }
+}
+
+async fn parse_empty(resp: Response) -> Result<()> {
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let body = resp.bytes().await.map_err(ApiError::transport)?;
+        Err(ApiError::from_response(status, &body))
+    }
 }
 
 async fn parse_response<T: DeserializeOwned>(resp: Response) -> Result<T> {

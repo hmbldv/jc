@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Typed client for Confluence Cloud REST v2 — pages, spaces, attachments, and CQL search."
+readme = "README.md"
 keywords = ["confluence", "atlassian", "rest", "api", "client"]
 categories = ["api-bindings"]
 

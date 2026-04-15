@@ -16,7 +16,11 @@ pub struct Envelope<T: Serialize> {
 
 impl<T: Serialize> Envelope<T> {
     pub fn new(data: T) -> Self {
-        Self { data, warnings: vec![], meta: None }
+        Self {
+            data,
+            warnings: vec![],
+            meta: None,
+        }
     }
 
     pub fn emit(self) {
@@ -43,11 +47,15 @@ pub enum CliError {
 
 impl CliError {
     pub fn io(message: impl Into<String>) -> Self {
-        Self::Io { message: message.into() }
+        Self::Io {
+            message: message.into(),
+        }
     }
 
     pub fn validation(message: impl Into<String>) -> Self {
-        Self::Validation { message: message.into() }
+        Self::Validation {
+            message: message.into(),
+        }
     }
 
     pub fn exit_code(&self) -> ExitCode {

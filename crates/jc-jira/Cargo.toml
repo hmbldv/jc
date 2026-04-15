@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Typed client for Jira Cloud REST v3 — issues, comments, attachments, transitions, JQL search, and custom fields."
+readme = "README.md"
 keywords = ["jira", "atlassian", "rest", "api", "client"]
 categories = ["api-bindings"]
 

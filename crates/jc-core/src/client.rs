@@ -44,7 +44,12 @@ impl Client {
             .https_only(true)
             .build()
             .map_err(ApiError::transport)?;
-        Ok(Self { http, base, email, token })
+        Ok(Self {
+            http,
+            base,
+            email,
+            token,
+        })
     }
 
     pub fn base(&self) -> &Url {
@@ -63,11 +68,7 @@ impl Client {
         }
     }
 
-    pub async fn request_json<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-    ) -> Result<T> {
+    pub async fn request_json<T: DeserializeOwned>(&self, method: Method, path: &str) -> Result<T> {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request(method.as_str(), &url);
         let policy = Self::policy_for(&method);
@@ -226,7 +227,10 @@ impl Client {
         // the bytes of an attachment they chose. The memory cost is paid
         // by the caller, not a hostile third party.
         let bytes = resp.bytes().await.map_err(ApiError::transport)?;
-        Ok(DownloadedBlob { bytes, content_type })
+        Ok(DownloadedBlob {
+            bytes,
+            content_type,
+        })
     }
 
     /// POST a multipart/form-data body, parsing a JSON response. Sets
@@ -364,9 +368,21 @@ mod tests {
 
     #[test]
     fn policy_for_mutation_is_idempotency_safe() {
-        assert_eq!(Client::policy_for(&Method::POST), RetryPolicy::IdempotencySafe);
-        assert_eq!(Client::policy_for(&Method::PUT), RetryPolicy::IdempotencySafe);
-        assert_eq!(Client::policy_for(&Method::DELETE), RetryPolicy::IdempotencySafe);
-        assert_eq!(Client::policy_for(&Method::PATCH), RetryPolicy::IdempotencySafe);
+        assert_eq!(
+            Client::policy_for(&Method::POST),
+            RetryPolicy::IdempotencySafe
+        );
+        assert_eq!(
+            Client::policy_for(&Method::PUT),
+            RetryPolicy::IdempotencySafe
+        );
+        assert_eq!(
+            Client::policy_for(&Method::DELETE),
+            RetryPolicy::IdempotencySafe
+        );
+        assert_eq!(
+            Client::policy_for(&Method::PATCH),
+            RetryPolicy::IdempotencySafe
+        );
     }
 }

@@ -38,7 +38,10 @@ mod tests {
 
     #[test]
     fn preserves_newlines_and_tabs() {
-        assert_eq!(sanitize("line 1\nline 2\tindented"), "line 1\nline 2\tindented");
+        assert_eq!(
+            sanitize("line 1\nline 2\tindented"),
+            "line 1\nline 2\tindented"
+        );
     }
 
     #[test]

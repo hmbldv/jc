@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Pure markdown <-> Atlassian Document Format (ADF) converter. Lossless via an `adf:<type>` fenced-block escape hatch."
+readme = "README.md"
 keywords = ["adf", "atlassian", "markdown", "jira", "confluence"]
 categories = ["text-processing", "parsing"]
 

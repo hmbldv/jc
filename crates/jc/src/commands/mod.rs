@@ -116,9 +116,10 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
             b = b.order_by("updated DESC");
             run_jql(&b.build(), limit, show_query).await
         }
-        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
-            JiraCommentCommand::Add { key, body_file },
-        ))) => jira_comment_add(&key, &body_file, mode).await,
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(JiraCommentCommand::Add {
+            key,
+            body_file,
+        }))) => jira_comment_add(&key, &body_file, mode).await,
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Comment(
             JiraCommentCommand::List { key },
         ))) => jira_comment_list(&key, limit).await,
@@ -169,9 +170,7 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
             jira_issue_link(link_cmd, mode).await
         }
 
-        Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => {
-            conf_page_get(&id).await
-        }
+        Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => conf_page_get(&id).await,
         Command::Conf(ConfCommand::Page(ConfPageCommand::List { space, parent })) => {
             conf_page_list(&space, parent.as_deref(), limit).await
         }
@@ -183,16 +182,21 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
             title,
             from_markdown,
             parent,
-        })) => {
-            conf_page_create(&space, &title, &from_markdown, parent.as_deref(), mode).await
-        }
+        })) => conf_page_create(&space, &title, &from_markdown, parent.as_deref(), mode).await,
         Command::Conf(ConfCommand::Page(ConfPageCommand::Update {
             id,
             from_markdown,
             title,
             expected_version,
         })) => {
-            conf_page_update(&id, &from_markdown, title.as_deref(), expected_version, mode).await
+            conf_page_update(
+                &id,
+                &from_markdown,
+                title.as_deref(),
+                expected_version,
+                mode,
+            )
+            .await
         }
         Command::Conf(ConfCommand::Page(ConfPageCommand::Delete { id })) => {
             conf_page_delete(&id, mode).await
@@ -201,9 +205,7 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         Command::Conf(ConfCommand::Space(ConfSpaceCommand::Get { key_or_id })) => {
             conf_space_get(&key_or_id).await
         }
-        Command::Conf(ConfCommand::Cql { query }) => {
-            run_cql(&query, limit, show_query).await
-        }
+        Command::Conf(ConfCommand::Cql { query }) => run_cql(&query, limit, show_query).await,
         Command::Conf(ConfCommand::Attachment(ConfAttachmentCommand::List { page })) => {
             conf_attachment_list(&page, limit).await
         }
@@ -304,11 +306,7 @@ async fn jira_issue_get(key: &str) -> Result<(), CliError> {
     let client = jira_client()?;
     let issue = jc_jira::issue::get(&client, key).await?;
 
-    let description_markdown = issue
-        .fields
-        .description
-        .as_ref()
-        .map(jc_adf::to_markdown);
+    let description_markdown = issue.fields.description.as_ref().map(jc_adf::to_markdown);
 
     let data = json!({
         "id": issue.id,
@@ -382,14 +380,9 @@ async fn run_jql(query: &str, limit: usize, show_query: bool) -> Result<(), CliE
     Ok(())
 }
 
-async fn jira_comment_add(
-    key: &str,
-    body_file: &Path,
-    mode: PreviewMode,
-) -> Result<(), CliError> {
-    let md = std::fs::read_to_string(body_file).map_err(|e| {
-        CliError::io(format!("read {}: {e}", body_file.display()))
-    })?;
+async fn jira_comment_add(key: &str, body_file: &Path, mode: PreviewMode) -> Result<(), CliError> {
+    let md = std::fs::read_to_string(body_file)
+        .map_err(|e| CliError::io(format!("read {}: {e}", body_file.display())))?;
     if md.trim().is_empty() {
         return Err(CliError::validation(format!(
             "body file {} is empty",
@@ -430,8 +423,7 @@ async fn jira_comment_add(
         PreviewMode::Send => {}
     }
 
-    let (replacements, uploaded) =
-        upload_images_for_jira_issue(&client, key, &images).await?;
+    let (replacements, uploaded) = upload_images_for_jira_issue(&client, key, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
     let final_adf = compile_adf(&final_md, &mentions);
 
@@ -543,8 +535,7 @@ async fn jira_comment_edit(
         PreviewMode::Send => {}
     }
 
-    let (replacements, uploaded) =
-        upload_images_for_jira_issue(&client, key, &images).await?;
+    let (replacements, uploaded) = upload_images_for_jira_issue(&client, key, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
     let final_adf = compile_adf(&final_md, &mentions);
 
@@ -578,8 +569,8 @@ async fn jira_comment_delete(
         "https://{}/rest/api/3/issue/{}/comment/{}",
         cfg.site, key, comment_id
     );
-    let preview = Preview::new("DELETE", url)
-        .with_summary(format!("Delete comment {comment_id} on {key}"));
+    let preview =
+        Preview::new("DELETE", url).with_summary(format!("Delete comment {comment_id} on {key}"));
 
     match mode {
         PreviewMode::DryRun => {
@@ -606,11 +597,7 @@ async fn jira_comment_delete(
     Ok(())
 }
 
-async fn jira_issue_transition(
-    key: &str,
-    target: &str,
-    mode: PreviewMode,
-) -> Result<(), CliError> {
+async fn jira_issue_transition(key: &str, target: &str, mode: PreviewMode) -> Result<(), CliError> {
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
 
@@ -737,9 +724,7 @@ fn safe_write(out_dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf, C
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
-            CliError::validation(format!(
-                "server returned unsafe filename: {filename:?}"
-            ))
+            CliError::validation(format!("server returned unsafe filename: {filename:?}"))
         })?;
 
     if raw_name.is_empty() || raw_name == "." || raw_name == ".." {
@@ -801,13 +786,9 @@ fn unreadable_mime_warning(mime: Option<&str>) -> Option<String> {
     }
 }
 
-async fn jira_attachment_upload(
-    key: &str,
-    file: &Path,
-    mode: PreviewMode,
-) -> Result<(), CliError> {
-    let bytes = std::fs::read(file)
-        .map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
+async fn jira_attachment_upload(key: &str, file: &Path, mode: PreviewMode) -> Result<(), CliError> {
+    let bytes =
+        std::fs::read(file).map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
     let filename = file
         .file_name()
         .and_then(|n| n.to_str())
@@ -837,8 +818,7 @@ async fn jira_attachment_upload(
     }
 
     let client = cfg.jira_client()?;
-    let uploaded =
-        jc_jira::attachments::upload(&client, key, &filename, bytes, mime).await?;
+    let uploaded = jc_jira::attachments::upload(&client, key, &filename, bytes, mime).await?;
 
     let data: Vec<_> = uploaded
         .iter()
@@ -870,25 +850,20 @@ async fn upload_image_to_jira_issue(
     issue_key: &str,
     path: &Path,
 ) -> Result<String, CliError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| CliError::validation(format!("invalid filename: {}", path.display())))?
         .to_string();
     let mime = guess_mime_from_ext(path);
-    let uploaded =
-        jc_jira::attachments::upload(client, issue_key, &filename, bytes, mime).await?;
-    uploaded
-        .into_iter()
-        .next()
-        .map(|a| a.id)
-        .ok_or_else(|| {
-            CliError::validation(format!(
-                "upload to {issue_key} returned no attachment metadata"
-            ))
-        })
+    let uploaded = jc_jira::attachments::upload(client, issue_key, &filename, bytes, mime).await?;
+    uploaded.into_iter().next().map(|a| a.id).ok_or_else(|| {
+        CliError::validation(format!(
+            "upload to {issue_key} returned no attachment metadata"
+        ))
+    })
 }
 
 /// Same idea for Confluence pages.
@@ -897,25 +872,20 @@ async fn upload_image_to_conf_page(
     page_id: &str,
     path: &Path,
 ) -> Result<String, CliError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| CliError::validation(format!("invalid filename: {}", path.display())))?
         .to_string();
     let mime = guess_mime_from_ext(path);
-    let uploaded =
-        jc_conf::attachments::upload(client, page_id, &filename, bytes, mime).await?;
-    uploaded
-        .into_iter()
-        .next()
-        .map(|a| a.id)
-        .ok_or_else(|| {
-            CliError::validation(format!(
-                "upload to page {page_id} returned no attachment metadata"
-            ))
-        })
+    let uploaded = jc_conf::attachments::upload(client, page_id, &filename, bytes, mime).await?;
+    uploaded.into_iter().next().map(|a| a.id).ok_or_else(|| {
+        CliError::validation(format!(
+            "upload to page {page_id} returned no attachment metadata"
+        ))
+    })
 }
 
 /// Upload every image in `images` to the given Jira issue and return
@@ -963,7 +933,9 @@ async fn upload_images_for_conf_page(
 /// as the base for resolving relative image URLs. Falls back to `.`
 /// when the file has no parent (e.g. a bare filename in CWD).
 fn base_dir_of(file: &Path) -> &Path {
-    file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+    file.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// Resolve every `@[query]` token in `md` via the user search API.
@@ -1090,7 +1062,10 @@ async fn conf_page_search(
     // CQL shares JQL's string literal grammar: `literal::escape_string`
     // correctly handles both backslashes and double quotes (the previous
     // inline replace handled only `"`, leaving a backslash-injection hole).
-    let mut query = format!("type = \"page\" AND text ~ {}", literal::escape_string(terms));
+    let mut query = format!(
+        "type = \"page\" AND text ~ {}",
+        literal::escape_string(terms)
+    );
     if let Some(s) = space {
         query.push_str(&format!(" AND space = {}", literal::escape_string(s)));
     }
@@ -1159,8 +1134,7 @@ async fn conf_page_create(
 
     // Phase 2: upload images to the new page; follow-up update with
     // rewritten body that references the real attachment IDs.
-    let (replacements, uploaded) =
-        upload_images_for_conf_page(&client, &page.id, &images).await?;
+    let (replacements, uploaded) = upload_images_for_conf_page(&client, &page.id, &images).await?;
 
     let mut warnings: Vec<String> = Vec::new();
     let final_version = if !replacements.is_empty() {
@@ -1296,8 +1270,7 @@ async fn conf_page_update(
     }
 
     // Upload images to the existing page, rewrite markdown, rebuild request.
-    let (replacements, uploaded) =
-        upload_images_for_conf_page(&client, id, &images).await?;
+    let (replacements, uploaded) = upload_images_for_conf_page(&client, id, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
     let final_adf = compile_adf(&final_md, &mentions);
 
@@ -1468,10 +1441,7 @@ async fn jira_user_search(query: &str, limit: usize) -> Result<(), CliError> {
 
 /// Resolve an assignee descriptor ("me", accountId, or free text) to an
 /// accountId. "none" disassigns.
-async fn resolve_assignee(
-    client: &Client,
-    who: &str,
-) -> Result<Option<String>, CliError> {
+async fn resolve_assignee(client: &Client, who: &str) -> Result<Option<String>, CliError> {
     let trimmed = who.trim();
     if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("null") {
         return Ok(None);
@@ -1486,9 +1456,10 @@ async fn resolve_assignee(
     }
     // Otherwise search.
     let users = jc_jira::users::search(client, trimmed, 5).await?;
-    let first = users.into_iter().next().ok_or_else(|| {
-        CliError::validation(format!("no user matches '{who}'"))
-    })?;
+    let first = users
+        .into_iter()
+        .next()
+        .ok_or_else(|| CliError::validation(format!("no user matches '{who}'")))?;
     Ok(Some(first.account_id))
 }
 
@@ -1568,8 +1539,8 @@ async fn jira_issue_unwatch(key: &str, mode: PreviewMode) -> Result<(), CliError
         "https://{}/rest/api/3/issue/{}/watchers?accountId={}",
         cfg.site, key, me.account_id
     );
-    let preview = Preview::new("DELETE", url)
-        .with_summary(format!("Unwatch {key} as {}", me.display_name));
+    let preview =
+        Preview::new("DELETE", url).with_summary(format!("Unwatch {key} as {}", me.display_name));
 
     match mode {
         PreviewMode::DryRun => {
@@ -1624,11 +1595,7 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
             env.emit();
             Ok(())
         }
-        JiraLinkCommand::Add {
-            key,
-            to,
-            link_type,
-        } => {
+        JiraLinkCommand::Add { key, to, link_type } => {
             let cfg = Config::from_env()?;
             let url = format!("https://{}/rest/api/3/issueLink", cfg.site);
             let body = json!({
@@ -1668,8 +1635,8 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
         JiraLinkCommand::Remove { link_id } => {
             let cfg = Config::from_env()?;
             let url = format!("https://{}/rest/api/3/issueLink/{}", cfg.site, link_id);
-            let preview = Preview::new("DELETE", url)
-                .with_summary(format!("Remove issue link {link_id}"));
+            let preview =
+                Preview::new("DELETE", url).with_summary(format!("Remove issue link {link_id}"));
 
             match mode {
                 PreviewMode::DryRun => {
@@ -1767,8 +1734,8 @@ async fn conf_attachment_upload(
     file: &Path,
     mode: PreviewMode,
 ) -> Result<(), CliError> {
-    let bytes = std::fs::read(file)
-        .map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
+    let bytes =
+        std::fs::read(file).map_err(|e| CliError::io(format!("read {}: {e}", file.display())))?;
     let filename = file
         .file_name()
         .and_then(|n| n.to_str())
@@ -1801,8 +1768,7 @@ async fn conf_attachment_upload(
     }
 
     let client = cfg.jira_client()?;
-    let uploaded =
-        jc_conf::attachments::upload(&client, page_id, &filename, bytes, mime).await?;
+    let uploaded = jc_conf::attachments::upload(&client, page_id, &filename, bytes, mime).await?;
     let data: Vec<_> = uploaded
         .iter()
         .map(|a| {
@@ -1846,17 +1812,15 @@ fn build_fields_object(
     let mut obj = extras;
     for pair in pairs {
         let (raw_key, raw_val) = pair.split_once('=').ok_or_else(|| {
-            CliError::validation(format!(
-                "invalid --field '{pair}' (expected KEY=VALUE)"
-            ))
+            CliError::validation(format!("invalid --field '{pair}' (expected KEY=VALUE)"))
         })?;
         let key = raw_key.trim();
         let resolved = cache
             .resolve_id(key)
             .map(|s| s.to_string())
             .unwrap_or_else(|| key.to_string());
-        let value: Value = serde_json::from_str(raw_val)
-            .unwrap_or_else(|_| Value::String(raw_val.to_string()));
+        let value: Value =
+            serde_json::from_str(raw_val).unwrap_or_else(|_| Value::String(raw_val.to_string()));
         obj.insert(resolved, value);
     }
     Ok(Value::Object(obj))
@@ -1902,12 +1866,9 @@ async fn jira_issue_create(
 
     let fields_obj = build_fields_object(&cache, extra_fields, base)?;
 
-    let preview = Preview::new(
-        "POST",
-        format!("https://{}/rest/api/3/issue", cfg.site),
-    )
-    .with_body(json!({ "fields": fields_obj }))
-    .with_summary(format!("Create {issue_type} in {project}: {summary}"));
+    let preview = Preview::new("POST", format!("https://{}/rest/api/3/issue", cfg.site))
+        .with_body(json!({ "fields": fields_obj }))
+        .with_summary(format!("Create {issue_type} in {project}: {summary}"));
 
     match mode {
         PreviewMode::DryRun => {
@@ -2064,8 +2025,7 @@ async fn jira_issue_edit(
 
     // Upload images (if any), then rebuild the fields object with the
     // rewritten markdown so the description references real attachments.
-    let (replacements, uploaded) =
-        upload_images_for_jira_issue(&client, key, &images).await?;
+    let (replacements, uploaded) = upload_images_for_jira_issue(&client, key, &images).await?;
 
     let mut final_base = serde_json::Map::new();
     if let Some(s) = summary {
@@ -2150,7 +2110,10 @@ async fn publish(
         let comment_adf = jc_adf::to_adf(&template_md);
         Preview::new(
             "POST",
-            format!("https://{}/rest/api/3/issue/{}/comment", cfg.site, issue_key),
+            format!(
+                "https://{}/rest/api/3/issue/{}/comment",
+                cfg.site, issue_key
+            ),
         )
         .with_body(json!({ "body": comment_adf }))
         .with_summary(format!("Link published page in Jira issue {issue_key}"))
@@ -2195,8 +2158,7 @@ async fn publish(
 
     // Step 1b: upload local images to the new page and follow up with an
     // update that rewrites the body to reference real attachment IDs.
-    let (replacements, uploaded) =
-        upload_images_for_conf_page(&client, &page.id, &images).await?;
+    let (replacements, uploaded) = upload_images_for_conf_page(&client, &page.id, &images).await?;
     let mut warnings: Vec<String> = Vec::new();
     let final_version = if !replacements.is_empty() {
         let rewritten = rewrite_image_urls(&md, &replacements);
@@ -2303,10 +2265,7 @@ fn emit_dry_run_with_image_note(preview: &Preview, images: &[FoundImage]) {
 /// images that will be uploaded after the user confirms. The user sees
 /// both the converted request body AND the pending upload list before
 /// typing y/N.
-fn render_preview_with_images(
-    preview: &Preview,
-    images: &[FoundImage],
-) -> Result<(), CliError> {
+fn render_preview_with_images(preview: &Preview, images: &[FoundImage]) -> Result<(), CliError> {
     eprintln!("--- preview ---");
     preview.render_to_stderr()?;
     if !images.is_empty() {

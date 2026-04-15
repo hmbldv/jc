@@ -48,10 +48,7 @@ pub fn is_valid_relative_time(s: &str) -> bool {
     if i != bytes.len() - 1 {
         return false;
     }
-    matches!(
-        bytes[i],
-        b's' | b'm' | b'h' | b'd' | b'w' | b'M' | b'y'
-    )
+    matches!(bytes[i], b's' | b'm' | b'h' | b'd' | b'w' | b'M' | b'y')
 }
 
 #[cfg(test)]

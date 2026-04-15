@@ -106,7 +106,10 @@ mod tests {
         let images = find_local_images(md, Path::new("/tmp/docs"));
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].original_url, "./diagram.png");
-        assert_eq!(images[0].resolved_path, PathBuf::from("/tmp/docs/./diagram.png"));
+        assert_eq!(
+            images[0].resolved_path,
+            PathBuf::from("/tmp/docs/./diagram.png")
+        );
     }
 
     #[test]
@@ -154,7 +157,10 @@ mod tests {
         let md = "See ![arch](./diagram.png)!\n";
         let out = rewrite_image_urls(
             md,
-            &[("./diagram.png".to_string(), "attachment:att-123".to_string())],
+            &[(
+                "./diagram.png".to_string(),
+                "attachment:att-123".to_string(),
+            )],
         );
         assert_eq!(out, "See ![arch](attachment:att-123)!\n");
     }
@@ -179,10 +185,7 @@ mod tests {
     fn rewrite_handles_duplicate_original() {
         // Both references to the same URL get rewritten in one pass.
         let md = "![first](./img.png) and ![second](./img.png)";
-        let out = rewrite_image_urls(
-            md,
-            &[("./img.png".to_string(), "attachment:X".to_string())],
-        );
+        let out = rewrite_image_urls(md, &[("./img.png".to_string(), "attachment:X".to_string())]);
         assert_eq!(out.matches("(attachment:X)").count(), 2);
         assert!(!out.contains("(./img.png)"));
     }

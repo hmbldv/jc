@@ -76,12 +76,7 @@ pub async fn list(client: &Client, issue_key: &str, limit: usize) -> Result<Vec<
 }
 
 /// PUT /rest/api/3/issue/{key}/comment/{id}
-pub async fn edit(
-    client: &Client,
-    issue_key: &str,
-    id: &str,
-    body: &Value,
-) -> Result<Comment> {
+pub async fn edit(client: &Client, issue_key: &str, id: &str, body: &Value) -> Result<Comment> {
     let path = format!("rest/api/3/issue/{issue_key}/comment/{id}");
     client.put_json(&path, &CommentBodyRequest { body }).await
 }

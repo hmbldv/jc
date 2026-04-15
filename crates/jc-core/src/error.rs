@@ -37,19 +37,27 @@ struct AtlassianErrorBody {
 
 impl ApiError {
     pub fn transport(e: reqwest::Error) -> Self {
-        Self::Transport { message: e.to_string() }
+        Self::Transport {
+            message: e.to_string(),
+        }
     }
 
     pub fn decode(e: serde_json::Error) -> Self {
-        Self::Decode { message: e.to_string() }
+        Self::Decode {
+            message: e.to_string(),
+        }
     }
 
     pub fn url(e: url::ParseError) -> Self {
-        Self::Url { message: e.to_string() }
+        Self::Url {
+            message: e.to_string(),
+        }
     }
 
     pub fn config(msg: impl Into<String>) -> Self {
-        Self::Config { message: msg.into() }
+        Self::Config {
+            message: msg.into(),
+        }
     }
 
     pub fn from_response(status: StatusCode, body: &[u8]) -> Self {

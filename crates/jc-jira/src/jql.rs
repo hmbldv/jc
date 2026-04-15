@@ -21,13 +21,15 @@ impl JqlBuilder {
 
     /// `field = "value"` — value is escape-quoted.
     pub fn eq(mut self, field: &str, value: &str) -> Self {
-        self.clauses.push(format!("{field} = {}", escape_string(value)));
+        self.clauses
+            .push(format!("{field} = {}", escape_string(value)));
         self
     }
 
     /// `field ~ "value"` — full-text match, value is escape-quoted.
     pub fn contains(mut self, field: &str, value: &str) -> Self {
-        self.clauses.push(format!("{field} ~ {}", escape_string(value)));
+        self.clauses
+            .push(format!("{field} ~ {}", escape_string(value)));
         self
     }
 

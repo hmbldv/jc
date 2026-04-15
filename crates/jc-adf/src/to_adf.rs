@@ -71,11 +71,17 @@ enum Frame {
     OrderedList(Vec<Value>),
     Item(Vec<Value>),
     Blockquote(Vec<Value>),
-    CodeBlock { lang: String, text: String },
+    CodeBlock {
+        lang: String,
+        text: String,
+    },
     Table(Vec<Value>),
     TableHead(Vec<Value>),
     TableRow(Vec<Value>),
-    TableCell { is_header: bool, content: Vec<Value> },
+    TableCell {
+        is_header: bool,
+        content: Vec<Value>,
+    },
 }
 
 fn handle_start(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, tag: Tag) {
@@ -98,7 +104,10 @@ fn handle_start(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, tag: Tag) {
                 CodeBlockKind::Fenced(s) => s.to_string(),
                 CodeBlockKind::Indented => String::new(),
             };
-            stack.push(Frame::CodeBlock { lang, text: String::new() });
+            stack.push(Frame::CodeBlock {
+                lang,
+                text: String::new(),
+            });
         }
         Tag::List(Some(_)) => stack.push(Frame::OrderedList(Vec::new())),
         Tag::List(None) => stack.push(Frame::BulletList(Vec::new())),
@@ -126,7 +135,10 @@ fn handle_start(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, tag: Tag) {
             // Cells inside a TableHead become tableHeader nodes; cells
             // inside a TableRow become tableCell nodes.
             let is_header = matches!(stack.last(), Some(Frame::TableHead(_)));
-            stack.push(Frame::TableCell { is_header, content: Vec::new() });
+            stack.push(Frame::TableCell {
+                is_header,
+                content: Vec::new(),
+            });
         }
         _ => {}
     }
@@ -221,7 +233,11 @@ fn close_frame(stack: &mut Vec<Frame>) -> Value {
             "content": cells,
         }),
         Frame::TableCell { is_header, content } => {
-            let node_type = if is_header { "tableHeader" } else { "tableCell" };
+            let node_type = if is_header {
+                "tableHeader"
+            } else {
+                "tableCell"
+            };
             // ADF table cells expect block children (paragraphs). The
             // implicit-paragraph handling in push_inline / TagEnd::TableCell
             // already ensures `content` is a Vec of block nodes.
@@ -412,19 +428,13 @@ mod tests {
         assert_eq!(head_cells.len(), 2);
         assert_eq!(head_cells[0]["type"], "tableHeader");
         assert_eq!(head_cells[1]["type"], "tableHeader");
-        assert_eq!(
-            head_cells[0]["content"][0]["content"][0]["text"],
-            "Col 1"
-        );
+        assert_eq!(head_cells[0]["content"][0]["content"][0]["text"], "Col 1");
 
         // Body rows: all cells are tableCell
         let body_cells = rows[1]["content"].as_array().unwrap();
         assert_eq!(body_cells[0]["type"], "tableCell");
         assert_eq!(body_cells[0]["content"][0]["type"], "paragraph");
-        assert_eq!(
-            body_cells[0]["content"][0]["content"][0]["text"],
-            "a"
-        );
+        assert_eq!(body_cells[0]["content"][0]["content"][0]["text"], "a");
     }
 
     #[test]

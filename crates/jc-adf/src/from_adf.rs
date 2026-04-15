@@ -560,7 +560,10 @@ mod tests {
                 "attrs": {"id": "att-42", "alt": "architecture diagram", "type": "file"}
             }]
         }]));
-        assert_eq!(to_markdown(&d), "![architecture diagram](attachment:att-42)\n");
+        assert_eq!(
+            to_markdown(&d),
+            "![architecture diagram](attachment:att-42)\n"
+        );
     }
 
     #[test]

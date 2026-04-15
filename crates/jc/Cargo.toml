@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "Single-binary CLI for Jira Cloud and Confluence Cloud, designed for Claude Code consumption. JSON-first output, markdown-native input, dry-run preview on every mutation."
+readme = "README.md"
 keywords = ["jira", "confluence", "atlassian", "cli", "claude"]
 categories = ["command-line-utilities", "api-bindings"]
 

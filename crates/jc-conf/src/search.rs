@@ -50,8 +50,7 @@ pub async fn cql(client: &Client, query: &str, limit: usize) -> Result<Vec<Searc
     let mut start: u64 = 0;
 
     loop {
-        let path =
-            format!("wiki/rest/api/search?cql={encoded}&start={start}&limit={PAGE_SIZE}");
+        let path = format!("wiki/rest/api/search?cql={encoded}&start={start}&limit={PAGE_SIZE}");
         let resp: SearchResponse = client.request_json(Method::GET, &path).await?;
         let got = resp.size;
         let total = resp.total_size;

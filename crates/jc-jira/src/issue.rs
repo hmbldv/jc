@@ -139,8 +139,7 @@ pub async fn add_watcher(client: &Client, key: &str, account_id: &str) -> Result
 
 /// DELETE /rest/api/3/issue/{key}/watchers?accountId=...
 pub async fn remove_watcher(client: &Client, key: &str, account_id: &str) -> Result<()> {
-    let encoded: String =
-        url::form_urlencoded::byte_serialize(account_id.as_bytes()).collect();
+    let encoded: String = url::form_urlencoded::byte_serialize(account_id.as_bytes()).collect();
     let path = format!("rest/api/3/issue/{key}/watchers?accountId={encoded}");
     client.delete_no_content(&path).await
 }

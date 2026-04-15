@@ -27,8 +27,7 @@ impl Config {
     }
 
     pub fn jira_client(&self) -> Result<Client> {
-        let base = Url::parse(&format!("https://{}/", self.site))
-            .map_err(ApiError::url)?;
+        let base = Url::parse(&format!("https://{}/", self.site)).map_err(ApiError::url)?;
         Client::new(base, self.email.clone(), self.token.clone())
     }
 

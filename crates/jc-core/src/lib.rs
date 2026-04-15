@@ -7,6 +7,8 @@ pub mod cache;
 pub mod client;
 pub mod error;
 pub mod literal;
+pub mod retry;
 
 pub use client::{Client, DownloadedBlob};
 pub use error::{ApiError, Result};
+pub use retry::RetryPolicy;

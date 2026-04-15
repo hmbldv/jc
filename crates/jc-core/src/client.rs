@@ -8,6 +8,7 @@ use tracing::debug;
 use url::Url;
 
 use crate::error::{ApiError, Result};
+use crate::retry::{RetryPolicy, send_with_retry};
 
 /// Binary response with content-type metadata. Used for attachment downloads.
 #[derive(Debug)]
@@ -50,6 +51,18 @@ impl Client {
         &self.base
     }
 
+    /// Pick a retry policy appropriate for the given HTTP method. GETs
+    /// and HEADs are idempotent and safe to replay on read-side 5xx;
+    /// everything else retries only on 429, which Atlassian guarantees
+    /// means the request was rejected before processing.
+    fn policy_for(method: &Method) -> RetryPolicy {
+        if method == Method::GET || method == Method::HEAD {
+            RetryPolicy::Read
+        } else {
+            RetryPolicy::IdempotencySafe
+        }
+    }
+
     pub async fn request_json<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -57,14 +70,17 @@ impl Client {
     ) -> Result<T> {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request(method.as_str(), &url);
-        let resp = self
-            .http
-            .request(method, url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let policy = Self::policy_for(&method);
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .request(method.clone(), url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+            },
+            policy,
+        )
+        .await?;
         parse_response(resp).await
     }
 
@@ -77,15 +93,17 @@ impl Client {
     {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("POST", &url);
-        let resp = self
-            .http
-            .post(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .post(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+                    .json(body)
+            },
+            RetryPolicy::IdempotencySafe,
+        )
+        .await?;
         parse_response(resp).await
     }
 
@@ -97,15 +115,17 @@ impl Client {
     {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("PUT", &url);
-        let resp = self
-            .http
-            .put(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .put(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+                    .json(body)
+            },
+            RetryPolicy::IdempotencySafe,
+        )
+        .await?;
         parse_response(resp).await
     }
 
@@ -117,15 +137,17 @@ impl Client {
     {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("POST", &url);
-        let resp = self
-            .http
-            .post(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .post(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+                    .json(body)
+            },
+            RetryPolicy::IdempotencySafe,
+        )
+        .await?;
         parse_empty(resp).await
     }
 
@@ -137,15 +159,17 @@ impl Client {
     {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("PUT", &url);
-        let resp = self
-            .http
-            .put(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .put(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+                    .json(body)
+            },
+            RetryPolicy::IdempotencySafe,
+        )
+        .await?;
         parse_empty(resp).await
     }
 
@@ -153,14 +177,16 @@ impl Client {
     pub async fn delete_no_content(&self, path: &str) -> Result<()> {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("DELETE", &url);
-        let resp = self
-            .http
-            .delete(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .delete(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+                    .header("Accept", "application/json")
+            },
+            RetryPolicy::IdempotencySafe,
+        )
+        .await?;
         parse_empty(resp).await
     }
 
@@ -174,13 +200,15 @@ impl Client {
     pub async fn download_bytes(&self, path: &str) -> Result<DownloadedBlob> {
         let url = self.base.join(path).map_err(ApiError::url)?;
         trace_request("GET", &url);
-        let resp = self
-            .http
-            .get(url)
-            .basic_auth(&self.email, Some(&self.token))
-            .send()
-            .await
-            .map_err(ApiError::transport)?;
+        let resp = send_with_retry(
+            || {
+                self.http
+                    .get(url.clone())
+                    .basic_auth(&self.email, Some(&self.token))
+            },
+            RetryPolicy::Read,
+        )
+        .await?;
 
         let status = resp.status();
         trace_response(status, resp.url());
@@ -204,6 +232,11 @@ impl Client {
     /// POST a multipart/form-data body, parsing a JSON response. Sets
     /// `X-Atlassian-Token: no-check` which Atlassian requires for CSRF-
     /// exempt file uploads.
+    ///
+    /// This path is NOT retried because `reqwest::multipart::Form` is
+    /// move-consumed on send and cannot be rebuilt without re-reading
+    /// the source file. A rate-limited upload surfaces as a 429 that
+    /// the caller must handle.
     pub async fn post_multipart<T>(&self, path: &str, form: Form) -> Result<T>
     where
         T: DeserializeOwned,
@@ -321,5 +354,19 @@ mod tests {
     fn scrub_url_preserves_port() {
         let url = Url::parse("https://example.com:8443/path").unwrap();
         assert_eq!(scrub_url(&url), "https://example.com:8443/path");
+    }
+
+    #[test]
+    fn policy_for_get_is_read() {
+        assert_eq!(Client::policy_for(&Method::GET), RetryPolicy::Read);
+        assert_eq!(Client::policy_for(&Method::HEAD), RetryPolicy::Read);
+    }
+
+    #[test]
+    fn policy_for_mutation_is_idempotency_safe() {
+        assert_eq!(Client::policy_for(&Method::POST), RetryPolicy::IdempotencySafe);
+        assert_eq!(Client::policy_for(&Method::PUT), RetryPolicy::IdempotencySafe);
+        assert_eq!(Client::policy_for(&Method::DELETE), RetryPolicy::IdempotencySafe);
+        assert_eq!(Client::policy_for(&Method::PATCH), RetryPolicy::IdempotencySafe);
     }
 }

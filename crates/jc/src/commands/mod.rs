@@ -13,6 +13,7 @@ use crate::cli::{
     JiraIssueCommand, JiraLinkCommand, JiraUserCommand,
 };
 use crate::config::Config;
+use crate::markdown_images::{FoundImage, find_local_images, rewrite_image_urls};
 use crate::output::{CliError, Envelope};
 use crate::preview::{Preview, PreviewMode, emit_composite_dry_run, prompt_yes_no};
 
@@ -390,26 +391,30 @@ async fn jira_comment_add(
             body_file.display()
         )));
     }
-    let adf = jc_adf::to_adf(&md);
+
+    let base_dir = base_dir_of(body_file);
+    let images = find_local_images(&md, base_dir);
 
     let cfg = Config::from_env()?;
     let url = format!("https://{}/rest/api/3/issue/{}/comment", cfg.site, key);
+
+    // Preview is built from the ORIGINAL markdown (local image paths
+    // still intact). The upload+rewrite happens after the confirmation
+    // gate so a cancelled --confirm doesn't leave orphaned attachments.
+    let preview_adf = jc_adf::to_adf(&md);
     let preview = Preview::new("POST", url)
-        .with_body(json!({ "body": adf }))
+        .with_body(json!({ "body": preview_adf }))
         .with_summary(format!("Add comment to {key}"));
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
-                let mut env = Envelope::new(json!({ "cancelled": true }));
-                let mut meta = serde_json::Map::new();
-                meta.insert("mode".into(), json!("confirm"));
-                env.meta = Some(Value::Object(meta));
-                env.emit();
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
+                emit_cancelled();
                 return Ok(());
             }
         }
@@ -417,13 +422,24 @@ async fn jira_comment_add(
     }
 
     let client = cfg.jira_client()?;
-    let comment = jc_jira::comment::add(&client, key, &adf).await?;
-    Envelope::new(json!({
+    let (replacements, uploaded) =
+        upload_images_for_jira_issue(&client, key, &images).await?;
+    let final_md = rewrite_image_urls(&md, &replacements);
+    let final_adf = jc_adf::to_adf(&final_md);
+
+    let comment = jc_jira::comment::add(&client, key, &final_adf).await?;
+
+    let mut env = Envelope::new(json!({
         "id": comment.id,
         "created": comment.created,
         "author": comment.author.as_ref().map(|u| &u.display_name),
-    }))
-    .emit();
+        "uploaded_images": uploaded,
+    }));
+    if !uploaded.is_empty() {
+        env.warnings
+            .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    env.emit();
     Ok(())
 }
 
@@ -467,8 +483,14 @@ async fn jira_comment_edit(
             body_file.display()
         )));
     }
-    let new_adf = jc_adf::to_adf(&md);
-    let new_markdown = jc_adf::to_markdown(&new_adf);
+
+    let base_dir = base_dir_of(body_file);
+    let images = find_local_images(&md, base_dir);
+
+    // Convert the ORIGINAL md for preview; real upload+rewrite happens
+    // after the confirmation gate.
+    let preview_adf = jc_adf::to_adf(&md);
+    let preview_markdown = jc_adf::to_markdown(&preview_adf);
 
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
@@ -481,24 +503,25 @@ async fn jira_comment_edit(
         .map(jc_adf::to_markdown)
         .unwrap_or_default();
 
-    let diff = unified_diff(&current_markdown, &new_markdown);
+    let diff = unified_diff(&current_markdown, &preview_markdown);
 
     let url = format!(
         "https://{}/rest/api/3/issue/{}/comment/{}",
         cfg.site, key, comment_id
     );
     let preview = Preview::new("PUT", url)
-        .with_body(json!({ "body": new_adf }))
+        .with_body(json!({ "body": preview_adf }))
         .with_summary(format!("Edit comment {comment_id} on {key}"))
         .with_diff(diff);
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
                 emit_cancelled();
                 return Ok(());
             }
@@ -506,13 +529,23 @@ async fn jira_comment_edit(
         PreviewMode::Send => {}
     }
 
-    let updated = jc_jira::comment::edit(&client, key, comment_id, &new_adf).await?;
-    Envelope::new(json!({
+    let (replacements, uploaded) =
+        upload_images_for_jira_issue(&client, key, &images).await?;
+    let final_md = rewrite_image_urls(&md, &replacements);
+    let final_adf = jc_adf::to_adf(&final_md);
+
+    let updated = jc_jira::comment::edit(&client, key, comment_id, &final_adf).await?;
+    let mut env = Envelope::new(json!({
         "id": updated.id,
         "updated": updated.updated,
         "author": updated.author.as_ref().map(|u| &u.display_name),
-    }))
-    .emit();
+        "uploaded_images": uploaded,
+    }));
+    if !uploaded.is_empty() {
+        env.warnings
+            .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    env.emit();
     Ok(())
 }
 
@@ -809,6 +842,111 @@ async fn jira_attachment_upload(
     Ok(())
 }
 
+/// Upload a single local image file to a Jira issue and return the
+/// resulting attachment id. Used by the image pre-processor for
+/// `--body-file` / `--description-file` handlers whose target is an
+/// existing issue.
+async fn upload_image_to_jira_issue(
+    client: &Client,
+    issue_key: &str,
+    path: &Path,
+) -> Result<String, CliError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| CliError::validation(format!("invalid filename: {}", path.display())))?
+        .to_string();
+    let mime = guess_mime_from_ext(path);
+    let uploaded =
+        jc_jira::attachments::upload(client, issue_key, &filename, bytes, mime).await?;
+    uploaded
+        .into_iter()
+        .next()
+        .map(|a| a.id)
+        .ok_or_else(|| {
+            CliError::validation(format!(
+                "upload to {issue_key} returned no attachment metadata"
+            ))
+        })
+}
+
+/// Same idea for Confluence pages.
+async fn upload_image_to_conf_page(
+    client: &Client,
+    page_id: &str,
+    path: &Path,
+) -> Result<String, CliError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| CliError::validation(format!("invalid filename: {}", path.display())))?
+        .to_string();
+    let mime = guess_mime_from_ext(path);
+    let uploaded =
+        jc_conf::attachments::upload(client, page_id, &filename, bytes, mime).await?;
+    uploaded
+        .into_iter()
+        .next()
+        .map(|a| a.id)
+        .ok_or_else(|| {
+            CliError::validation(format!(
+                "upload to page {page_id} returned no attachment metadata"
+            ))
+        })
+}
+
+/// Upload every image in `images` to the given Jira issue and return
+/// the replacement list for [`rewrite_image_urls`] plus a JSON record
+/// of what was uploaded for the command result envelope.
+async fn upload_images_for_jira_issue(
+    client: &Client,
+    issue_key: &str,
+    images: &[FoundImage],
+) -> Result<(Vec<(String, String)>, Vec<Value>), CliError> {
+    let mut replacements = Vec::with_capacity(images.len());
+    let mut record = Vec::with_capacity(images.len());
+    for img in images {
+        let id = upload_image_to_jira_issue(client, issue_key, &img.resolved_path).await?;
+        replacements.push((img.original_url.clone(), format!("attachment:{id}")));
+        record.push(json!({
+            "original_url": img.original_url,
+            "path": img.resolved_path.display().to_string(),
+            "attachment_id": id,
+        }));
+    }
+    Ok((replacements, record))
+}
+
+async fn upload_images_for_conf_page(
+    client: &Client,
+    page_id: &str,
+    images: &[FoundImage],
+) -> Result<(Vec<(String, String)>, Vec<Value>), CliError> {
+    let mut replacements = Vec::with_capacity(images.len());
+    let mut record = Vec::with_capacity(images.len());
+    for img in images {
+        let id = upload_image_to_conf_page(client, page_id, &img.resolved_path).await?;
+        replacements.push((img.original_url.clone(), format!("attachment:{id}")));
+        record.push(json!({
+            "original_url": img.original_url,
+            "path": img.resolved_path.display().to_string(),
+            "attachment_id": id,
+        }));
+    }
+    Ok((replacements, record))
+}
+
+/// Convenience: the parent directory of a markdown source file, used
+/// as the base for resolving relative image URLs. Falls back to `.`
+/// when the file has no parent (e.g. a bare filename in CWD).
+fn base_dir_of(file: &Path) -> &Path {
+    file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+}
+
 fn guess_mime_from_ext(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
@@ -920,7 +1058,13 @@ async fn conf_page_create(
             body_file.display()
         )));
     }
-    let adf = jc_adf::to_adf(&md);
+
+    let base_dir = base_dir_of(body_file);
+    let images = find_local_images(&md, base_dir);
+
+    // Phase 1 ADF: convert original md (local image paths still intact
+    // as link marks). Uploads happen after create.
+    let initial_adf = jc_adf::to_adf(&md);
 
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
@@ -931,7 +1075,7 @@ async fn conf_page_create(
         status: "current",
         title,
         parent_id: parent,
-        body: jc_conf::page::BodyRequest::from_adf(&adf),
+        body: jc_conf::page::BodyRequest::from_adf(&initial_adf),
     };
 
     let url = format!("https://{}/wiki/api/v2/pages", cfg.site);
@@ -941,11 +1085,12 @@ async fn conf_page_create(
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
                 emit_cancelled();
                 return Ok(());
             }
@@ -953,15 +1098,59 @@ async fn conf_page_create(
         PreviewMode::Send => {}
     }
 
+    // Phase 1: create page with initial ADF.
     let page = jc_conf::page::create(&client, &req).await?;
-    Envelope::new(json!({
+
+    // Phase 2: upload images to the new page; follow-up update with
+    // rewritten body that references the real attachment IDs.
+    let (replacements, uploaded) =
+        upload_images_for_conf_page(&client, &page.id, &images).await?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let final_version = if !replacements.is_empty() {
+        let rewritten = rewrite_image_urls(&md, &replacements);
+        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let current_version = page.version.as_ref().map(|v| v.number).unwrap_or(1);
+        let next_version = current_version + 1;
+        let update_req = jc_conf::page::UpdatePageRequest {
+            id: &page.id,
+            status: "current",
+            title,
+            version: jc_conf::page::VersionRequest {
+                number: next_version,
+            },
+            body: jc_conf::page::BodyRequest::from_adf(&fixed_adf),
+        };
+        match jc_conf::page::update(&client, &page.id, &update_req).await {
+            Ok(updated) => {
+                warnings.push(format!(
+                    "uploaded {} image(s) and updated page body",
+                    uploaded.len()
+                ));
+                updated.version.as_ref().map(|v| v.number)
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "page {} created but image-aware follow-up update failed: {e}",
+                    page.id
+                ));
+                page.version.as_ref().map(|v| v.number)
+            }
+        }
+    } else {
+        page.version.as_ref().map(|v| v.number)
+    };
+
+    let mut env = Envelope::new(json!({
         "id": page.id,
         "title": page.title,
         "space_id": page.space_id,
         "parent_id": page.parent_id,
-        "version": page.version.as_ref().map(|v| v.number),
-    }))
-    .emit();
+        "version": final_version,
+        "uploaded_images": uploaded,
+    }));
+    env.warnings = warnings;
+    env.emit();
     Ok(())
 }
 
@@ -980,14 +1169,19 @@ async fn conf_page_update(
             body_file.display()
         )));
     }
-    let new_adf = jc_adf::to_adf(&md);
-    let new_markdown = jc_adf::to_markdown(&new_adf);
+
+    let base_dir = base_dir_of(body_file);
+    let images = find_local_images(&md, base_dir);
+
+    // Convert original md for the preview (local image URLs intact).
+    // Upload+rewrite happens after confirmation.
+    let preview_adf = jc_adf::to_adf(&md);
+    let preview_markdown = jc_adf::to_markdown(&preview_adf);
 
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
 
-    // Fetch current page to obtain version + existing title + current body
-    // (for diff preview).
+    // Fetch current page to obtain version + existing title + current body.
     let current = jc_conf::page::get(&client, id).await?;
     let current_version = current
         .version
@@ -1003,23 +1197,23 @@ async fn conf_page_update(
         .as_ref()
         .map(jc_adf::to_markdown)
         .unwrap_or_default();
-    let diff = unified_diff(&current_markdown, &new_markdown);
+    let diff = unified_diff(&current_markdown, &preview_markdown);
 
     let title = new_title.unwrap_or(&current.title);
 
-    let req = jc_conf::page::UpdatePageRequest {
+    let preview_req = jc_conf::page::UpdatePageRequest {
         id,
         status: "current",
         title,
         version: jc_conf::page::VersionRequest {
             number: next_version,
         },
-        body: jc_conf::page::BodyRequest::from_adf(&new_adf),
+        body: jc_conf::page::BodyRequest::from_adf(&preview_adf),
     };
 
     let url = format!("https://{}/wiki/api/v2/pages/{}", cfg.site, id);
     let preview = Preview::new("PUT", url)
-        .with_body(serde_json::to_value(&req).unwrap_or_else(|_| json!(null)))
+        .with_body(serde_json::to_value(&preview_req).unwrap_or_else(|_| json!(null)))
         .with_summary(format!(
             "Update page {id} '{title}' (v{current_version} -> v{next_version})"
         ))
@@ -1027,11 +1221,12 @@ async fn conf_page_update(
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
                 emit_cancelled();
                 return Ok(());
             }
@@ -1039,13 +1234,34 @@ async fn conf_page_update(
         PreviewMode::Send => {}
     }
 
-    let updated = jc_conf::page::update(&client, id, &req).await?;
-    Envelope::new(json!({
+    // Upload images to the existing page, rewrite markdown, rebuild request.
+    let (replacements, uploaded) =
+        upload_images_for_conf_page(&client, id, &images).await?;
+    let final_md = rewrite_image_urls(&md, &replacements);
+    let final_adf = jc_adf::to_adf(&final_md);
+
+    let final_req = jc_conf::page::UpdatePageRequest {
+        id,
+        status: "current",
+        title,
+        version: jc_conf::page::VersionRequest {
+            number: next_version,
+        },
+        body: jc_conf::page::BodyRequest::from_adf(&final_adf),
+    };
+
+    let updated = jc_conf::page::update(&client, id, &final_req).await?;
+    let mut env = Envelope::new(json!({
         "id": updated.id,
         "title": updated.title,
         "version": updated.version.as_ref().map(|v| v.number),
-    }))
-    .emit();
+        "uploaded_images": uploaded,
+    }));
+    if !uploaded.is_empty() {
+        env.warnings
+            .push(format!("uploaded {} image(s) to page {id}", uploaded.len()));
+    }
+    env.emit();
     Ok(())
 }
 
@@ -1592,15 +1808,23 @@ async fn jira_issue_create(
     let client = cfg.jira_client()?;
     let cache = jc_jira::fields::FieldsCache::load();
 
+    // Read markdown up front; image uploads happen AFTER create since
+    // the target issue doesn't exist yet.
+    let (md_source, images) = if let Some(path) = description_file {
+        let s = std::fs::read_to_string(path)
+            .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
+        let imgs = find_local_images(&s, base_dir_of(path));
+        (Some(s), imgs)
+    } else {
+        (None, Vec::new())
+    };
+
     let mut base = serde_json::Map::new();
     base.insert("project".into(), json!({ "key": project }));
     base.insert("issuetype".into(), json!({ "name": issue_type }));
     base.insert("summary".into(), json!(summary));
-
-    if let Some(path) = description_file {
-        let md = std::fs::read_to_string(path)
-            .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
-        base.insert("description".into(), jc_adf::to_adf(&md));
+    if let Some(md) = md_source.as_deref() {
+        base.insert("description".into(), jc_adf::to_adf(md));
     }
 
     let fields_obj = build_fields_object(&cache, extra_fields, base)?;
@@ -1610,17 +1834,16 @@ async fn jira_issue_create(
         format!("https://{}/rest/api/3/issue", cfg.site),
     )
     .with_body(json!({ "fields": fields_obj }))
-    .with_summary(format!(
-        "Create {issue_type} in {project}: {summary}"
-    ));
+    .with_summary(format!("Create {issue_type} in {project}: {summary}"));
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
                 emit_cancelled();
                 return Ok(());
             }
@@ -1628,13 +1851,46 @@ async fn jira_issue_create(
         PreviewMode::Send => {}
     }
 
+    // Phase 1: create the issue. Its description (if any) still
+    // references local image paths as links — we'll fix those up
+    // in phase 2.
     let created = jc_jira::issue::create(&client, &fields_obj).await?;
-    Envelope::new(json!({
+
+    // Phase 2: upload images to the new issue (if any) and do a
+    // follow-up edit to replace local paths with real `attachment:ID`
+    // references in the description.
+    let (replacements, uploaded) =
+        upload_images_for_jira_issue(&client, &created.key, &images).await?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    if !replacements.is_empty()
+        && let Some(md) = md_source.as_deref()
+    {
+        let rewritten = rewrite_image_urls(md, &replacements);
+        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let edit_fields = json!({ "description": fixed_adf });
+        if let Err(e) = jc_jira::issue::edit(&client, &created.key, &edit_fields).await {
+            warnings.push(format!(
+                "issue {} created but description follow-up edit failed: {e}",
+                created.key
+            ));
+        } else {
+            warnings.push(format!(
+                "uploaded {} image(s) and updated description on {}",
+                uploaded.len(),
+                created.key
+            ));
+        }
+    }
+
+    let mut env = Envelope::new(json!({
         "id": created.id,
         "key": created.key,
         "url": format!("https://{}/browse/{}", cfg.site, created.key),
-    }))
-    .emit();
+        "uploaded_images": uploaded,
+    }));
+    env.warnings = warnings;
+    env.emit();
     Ok(())
 }
 
@@ -1655,24 +1911,36 @@ async fn jira_issue_edit(
     let client = cfg.jira_client()?;
     let cache = jc_jira::fields::FieldsCache::load();
 
-    let mut base = serde_json::Map::new();
-    if let Some(s) = summary {
-        base.insert("summary".into(), json!(s));
-    }
-
-    let mut new_description_markdown: Option<String> = None;
-    if let Some(path) = description_file {
-        let md = std::fs::read_to_string(path)
+    // Read markdown and find images up front; the upload happens after
+    // the preview/confirm gate below.
+    let (md_source, images, base_dir_buf) = if let Some(path) = description_file {
+        let s = std::fs::read_to_string(path)
             .map_err(|e| CliError::io(format!("read {}: {e}", path.display())))?;
-        let adf = jc_adf::to_adf(&md);
-        new_description_markdown = Some(jc_adf::to_markdown(&adf));
-        base.insert("description".into(), adf);
-    }
+        let base = base_dir_of(path).to_path_buf();
+        let imgs = find_local_images(&s, &base);
+        (Some(s), imgs, Some(base))
+    } else {
+        (None, Vec::new(), None)
+    };
+    let _ = base_dir_buf; // retained for clarity; the paths inside `images` are already resolved
 
-    let fields_obj = build_fields_object(&cache, extra_fields, base)?;
+    // Build the preview fields with the ORIGINAL markdown so local
+    // image paths show up in the preview. The real upload+rewrite
+    // happens after confirmation.
+    let mut preview_base = serde_json::Map::new();
+    if let Some(s) = summary {
+        preview_base.insert("summary".into(), json!(s));
+    }
+    let preview_new_markdown = md_source.as_ref().map(|md| {
+        let adf = jc_adf::to_adf(md);
+        let rendered = jc_adf::to_markdown(&adf);
+        preview_base.insert("description".into(), adf);
+        rendered
+    });
+    let preview_fields = build_fields_object(&cache, extra_fields, preview_base)?;
 
     // Fetch current issue for diff (if description is being changed).
-    let diff = if new_description_markdown.is_some() {
+    let diff = if preview_new_markdown.is_some() {
         let current = jc_jira::issue::get(&client, key).await.ok();
         let current_md = current
             .as_ref()
@@ -1681,7 +1949,7 @@ async fn jira_issue_edit(
             .unwrap_or_default();
         Some(unified_diff(
             &current_md,
-            new_description_markdown.as_deref().unwrap_or(""),
+            preview_new_markdown.as_deref().unwrap_or(""),
         ))
     } else {
         None
@@ -1689,7 +1957,7 @@ async fn jira_issue_edit(
 
     let url = format!("https://{}/rest/api/3/issue/{}", cfg.site, key);
     let mut preview = Preview::new("PUT", url)
-        .with_body(json!({ "fields": fields_obj }))
+        .with_body(json!({ "fields": preview_fields }))
         .with_summary(format!("Edit {key}"));
     if let Some(d) = diff {
         preview = preview.with_diff(d);
@@ -1697,11 +1965,12 @@ async fn jira_issue_edit(
 
     match mode {
         PreviewMode::DryRun => {
-            preview.emit_dry_run();
+            emit_dry_run_with_image_note(&preview, &images);
             return Ok(());
         }
         PreviewMode::Confirm => {
-            if !preview.confirm_interactive()? {
+            render_preview_with_images(&preview, &images)?;
+            if !prompt_yes_no("Send? [y/N]: ")? {
                 emit_cancelled();
                 return Ok(());
             }
@@ -1709,12 +1978,33 @@ async fn jira_issue_edit(
         PreviewMode::Send => {}
     }
 
-    jc_jira::issue::edit(&client, key, &fields_obj).await?;
-    Envelope::new(json!({
+    // Upload images (if any), then rebuild the fields object with the
+    // rewritten markdown so the description references real attachments.
+    let (replacements, uploaded) =
+        upload_images_for_jira_issue(&client, key, &images).await?;
+
+    let mut final_base = serde_json::Map::new();
+    if let Some(s) = summary {
+        final_base.insert("summary".into(), json!(s));
+    }
+    if let Some(md) = md_source.as_deref() {
+        let rewritten = rewrite_image_urls(md, &replacements);
+        final_base.insert("description".into(), jc_adf::to_adf(&rewritten));
+    }
+    let final_fields = build_fields_object(&cache, extra_fields, final_base)?;
+
+    jc_jira::issue::edit(&client, key, &final_fields).await?;
+
+    let mut env = Envelope::new(json!({
         "edited": true,
         "key": key,
-    }))
-    .emit();
+        "uploaded_images": uploaded,
+    }));
+    if !uploaded.is_empty() {
+        env.warnings
+            .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    env.emit();
     Ok(())
 }
 
@@ -1734,6 +2024,11 @@ async fn publish(
             body_file.display()
         )));
     }
+
+    let base_dir = base_dir_of(body_file);
+    let images = find_local_images(&md, base_dir);
+
+    // Phase 1 ADF (images still as links; phase 2 rewrites after upload).
     let adf = jc_adf::to_adf(&md);
 
     let cfg = Config::from_env()?;
@@ -1806,19 +2101,57 @@ async fn publish(
         cfg.site, space_key, page.id
     );
 
+    // Step 1b: upload local images to the new page and follow up with an
+    // update that rewrites the body to reference real attachment IDs.
+    let (replacements, uploaded) =
+        upload_images_for_conf_page(&client, &page.id, &images).await?;
+    let mut warnings: Vec<String> = Vec::new();
+    let final_version = if !replacements.is_empty() {
+        let rewritten = rewrite_image_urls(&md, &replacements);
+        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let current_version = page.version.as_ref().map(|v| v.number).unwrap_or(1);
+        let next_version = current_version + 1;
+        let update_req = jc_conf::page::UpdatePageRequest {
+            id: &page.id,
+            status: "current",
+            title,
+            version: jc_conf::page::VersionRequest {
+                number: next_version,
+            },
+            body: jc_conf::page::BodyRequest::from_adf(&fixed_adf),
+        };
+        match jc_conf::page::update(&client, &page.id, &update_req).await {
+            Ok(updated) => {
+                warnings.push(format!(
+                    "uploaded {} image(s) and updated page body",
+                    uploaded.len()
+                ));
+                updated.version.as_ref().map(|v| v.number)
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "page {} created but image-aware follow-up update failed: {e}",
+                    page.id
+                ));
+                page.version.as_ref().map(|v| v.number)
+            }
+        }
+    } else {
+        page.version.as_ref().map(|v| v.number)
+    };
+
     let mut data = json!({
         "page": {
             "id": page.id,
             "title": page.title,
             "space_id": page.space_id,
             "parent_id": page.parent_id,
-            "version": page.version.as_ref().map(|v| v.number),
+            "version": final_version,
             "url": page_url,
         },
         "comment": Value::Null,
+        "uploaded_images": uploaded,
     });
-
-    let mut warnings: Vec<String> = Vec::new();
 
     // Execute step 2 if requested. Partial failure surfaces as a warning
     // rather than a hard error — the page is already created and linking
@@ -1846,6 +2179,46 @@ async fn publish(
     let mut env = Envelope::new(data);
     env.warnings = warnings;
     env.emit();
+    Ok(())
+}
+
+/// Emit a dry-run envelope for a mutation that has local-image uploads
+/// pending. The preview itself reflects the request body as it would be
+/// sent WITHOUT the uploads (local paths still in place); a warning
+/// lists the images that would actually be uploaded when the command
+/// runs for real.
+fn emit_dry_run_with_image_note(preview: &Preview, images: &[FoundImage]) {
+    let data = json!({ "preview": preview, "will_send": false });
+    let mut env = Envelope::new(data);
+    let mut meta = serde_json::Map::new();
+    meta.insert("mode".into(), json!("dry_run"));
+    env.meta = Some(Value::Object(meta));
+    for img in images {
+        env.warnings.push(format!(
+            "would upload {} (resolved: {})",
+            img.original_url,
+            img.resolved_path.display()
+        ));
+    }
+    env.emit();
+}
+
+/// Render a preview to stderr for confirm mode, followed by the list of
+/// images that will be uploaded after the user confirms. The user sees
+/// both the converted request body AND the pending upload list before
+/// typing y/N.
+fn render_preview_with_images(
+    preview: &Preview,
+    images: &[FoundImage],
+) -> Result<(), CliError> {
+    eprintln!("--- preview ---");
+    preview.render_to_stderr()?;
+    if !images.is_empty() {
+        eprintln!("\n--- images to upload on confirm ---");
+        for img in images {
+            eprintln!("  {} -> {}", img.original_url, img.resolved_path.display());
+        }
+    }
     Ok(())
 }
 

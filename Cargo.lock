@@ -599,6 +599,7 @@ dependencies = [
  "jc-core",
  "jc-jira",
  "keyring",
+ "pulldown-cmark",
  "reqwest",
  "serde",
  "serde_json",

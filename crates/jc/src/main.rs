@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod config;
 mod logging;
+mod markdown_images;
 mod output;
 mod preview;
 mod sanitize;

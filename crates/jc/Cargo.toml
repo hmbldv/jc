@@ -24,6 +24,7 @@ jc-conf.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 url.workspace = true
+pulldown-cmark.workspace = true
 
 clap.workspace = true
 serde.workspace = true

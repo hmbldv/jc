@@ -6,6 +6,104 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic retry with bounded backoff** (`jc-core::retry`). Every
+  HTTP verb routes through a `send_with_retry` helper that honors
+  `Retry-After` on 429 responses, falls back to exponential backoff
+  (500 ms → 1 s → 2 s → 4 s, capped ~64 s) when no header is
+  provided, gives up after 4 attempts, and refuses to block longer
+  than 120 s on a single response so the CLI can't stall
+  indefinitely.
+
+  Retry policy is per-verb:
+  - `RetryPolicy::Read` (GET / HEAD / download): 429 + 502 + 503 + 504
+  - `RetryPolicy::IdempotencySafe` (POST / PUT / DELETE / patch-less
+    204 endpoints): 429 only — other 5xx responses might indicate the
+    server partially processed a mutation, and we'd rather surface
+    the error than double-commit
+  - `RetryPolicy::None` (multipart upload): the `reqwest::multipart::
+    Form` is move-consumed on send, so retrying would require
+    re-reading the source file; single attempt only.
+
+- **Local image upload pre-processor** (`jc::markdown_images`).
+  `![alt](./diagram.png)` in any body-file / description-file /
+  from-markdown input now uploads the referenced file as an
+  attachment on the correct target and rewrites the markdown to
+  reference the resulting attachment ID before conversion. Relative
+  paths resolve against the markdown file's parent directory. Each
+  unique URL is uploaded once even when referenced multiple times.
+
+  - Edit commands (`comment add`, `comment edit`, `issue edit`,
+    `conf page update`) upload only *after* the `--confirm` gate so
+    cancellation leaves no orphaned attachments.
+  - Create commands (`issue create`, `page create`, `publish`) run
+    two-phase: create the target with the markdown unchanged, upload
+    images to the newly-created target, follow up with an edit that
+    rewrites the body to reference real attachment IDs. Partial
+    failure on the follow-up surfaces as a `warnings[]` entry
+    rather than hard-erroring so the created target isn't orphaned.
+  - Dry-run mode lists pending uploads in `warnings[]` without
+    actually uploading anything.
+
+- **Typed `@mention` resolver** (`jc::markdown_mentions`). `@[query]`
+  tokens in any markdown body are resolved via Jira user search and
+  become real ADF `mention` inline nodes so the target product
+  notifies the user and renders a clickable mention instead of a
+  literal `@alice` text.
+
+  Query forms accepted:
+  - Long alphanumeric accountId — used directly, no API round-trip
+  - Email address — resolved by exact case-insensitive match
+  - Display name or substring — exact match wins over partial; a
+    single partial match is accepted; multiple partial matches
+    without a tiebreaker error out with the candidate list for
+    disambiguation.
+
+  Resolution runs on all seven write-path commands
+  (`comment add/edit`, `issue create/edit`, `conf page
+  create/update`, `publish`). Mentions inside marked text (bold,
+  italic, code) are intentionally left as literal text because ADF
+  mention nodes don't support marks; splitting a marked text run
+  would silently drop formatting.
+
+- **GFM table support on both directions of the ADF converter.**
+  Markdown → ADF emits `table` / `tableRow` / `tableHeader` /
+  `tableCell` nodes with inline marks preserved inside cells. ADF
+  → Markdown walks rows, detects the header row by checking whether
+  all cells are `tableHeader`, synthesizes an empty header when
+  absent, emits a left-aligned separator, and escapes pipes and
+  backslashes inside cell content. Column alignment from GFM input
+  is dropped because ADF doesn't model it.
+
+- **Escape-hatch fence length now auto-scales.** `render_unknown_block`
+  and `render_unknown_inline` pick a fence with more backticks than
+  the longest run inside the serialized JSON body so a node whose
+  string value contains triple backticks can no longer break out of
+  the escape hatch on a round-trip.
+
+### Changed
+
+- **Stub cleanup.** Eight never-implemented placeholder modules
+  (`jc-core::retry`, `jc-core::paginate`, `jc-adf::toc`,
+  `jc-adf::attachments`, `jc-adf::mentions`, `jc-adf::tables`,
+  `jc-adf::unknown`, `jc-conf::types`) were originally deleted as
+  dead code, then three of them were reimplemented for real:
+  `retry` (now the shared retry layer), `attachments` and `mentions`
+  (now inlined as preprocessor modules in the `jc` crate because
+  they need HTTP access, which `jc-adf` is forbidden from having).
+  `jc-adf::lib.rs` docstring rewritten to honestly describe what
+  round-trips and what's deferred.
+
+### Fixed
+
+- **`escape_table_cell` now escapes backslash**. A cell containing
+  the literal text `\|` previously rendered as `\\|` in the output,
+  which GFM parses as `\` followed by a cell terminator — the pipe
+  was lost and cell boundaries shifted. Fix: escape `\` → `\\`
+  before `|` → `\|`, matching the order `jc_core::literal::
+  escape_string` uses.
+
 ## [0.1.0] — 2026-04-14
 
 Initial public release.

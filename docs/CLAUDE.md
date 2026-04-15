@@ -16,19 +16,23 @@ Config is read from env vars first, then the OS keychain. Required keys:
 `site`, `email`, `token`.
 
 - Env vars: `JC_SITE`, `JC_EMAIL`, `JC_TOKEN`
-- Keychain: service `jc`, accounts `site` / `email` / `token`
-- Store a value: `jc config set <key> <value>` (writes to keychain)
+- Keychain: service `dev.hmbldv.jc`, accounts `site` / `email` / `token`
+- Store a value: `jc config set <key> <value>` (writes to keychain).
+  Pass `-` as the value to read from stdin — that keeps the token out
+  of shell history, `ps` output, and argv logs.
 - Verify: `jc config test` (calls `/rest/api/3/myself`)
-- Inspect: `jc config show` (token redacted)
+- Inspect: `jc config show` (token redacted; reports which sources it
+  used so you can see whether env or keychain provided each value)
 
 ## Global flags
 
 - `--dry-run` — print the exact HTTP request that would be sent as JSON
   on stdout, exit 0, do not send anything
 - `--confirm` — render the preview to stderr, block on stdin `y/N`,
-  send if confirmed
+  send if confirmed. Errors immediately if stdin is not a TTY.
 - `--verbose` — log each HTTP request/response (method, URL, status) to
-  stderr, authorization always redacted
+  stderr. Authorization is always redacted; query strings are replaced
+  with `?<redacted>` so signed-URL redirect targets don't leak.
 - `--limit N` — cap list/search results. `0` = unlimited (default)
 - `--show-query` — echo compiled JQL/CQL in `meta.query` for wrapper
   commands
@@ -44,6 +48,10 @@ Success (stdout):
   "meta": { "count": 42, "query": "...", "mode": "dry_run" }
 }
 ```
+
+Write commands that took a markdown body also include
+`uploaded_images: [...]` and `resolved_mentions: [...]` in the data
+payload so you can surface what was uploaded or linked.
 
 Error (stderr):
 
@@ -81,8 +89,80 @@ Edit commands populate `diff` with a unified diff against current remote
 state (markdown-level for ADF fields) so the user sees exactly what is
 changing.
 
+Commands whose markdown body references local images populate the
+dry-run envelope's `warnings[]` with one entry per `would upload`
+target. The preview body itself still shows the ORIGINAL markdown
+(local paths intact); uploads only happen on real send.
+
 Composite commands (`jc publish`) emit `{"previews": [...]}` with
 `meta.step_count` so each planned step is visible.
+
+## Markdown-native rich content
+
+Any command that takes a `--body-file`, `--description-file`, or
+`--from-markdown` path supports the full rich-content set. Use these
+syntaxes freely — `jc` handles the plumbing.
+
+### Local image embedding
+
+```markdown
+Here is the design:
+
+![architecture](./diagram.png)
+
+And a screenshot of the failure: ![bug](../screenshots/err.jpg)
+```
+
+Rules:
+- URLs with a scheme (`http://`, `https://`, `attachment:`, `data:`)
+  are left alone.
+- Relative paths are resolved against the markdown file's parent
+  directory, not the CWD.
+- Each unique local URL uploads once even if referenced multiple times.
+- The uploaded attachment id comes back in `data.uploaded_images[]`.
+- On **edit** commands (target exists): upload happens between the
+  confirmation gate and the send, so cancelling `--confirm` leaves no
+  orphans.
+- On **create** commands (target doesn't exist yet — `issue create`,
+  `page create`, `publish`): uploads run AFTER the target is created,
+  followed by a second-phase edit/update that rewrites the body to
+  reference real attachment IDs. Partial failure of the follow-up
+  surfaces as a `warnings[]` entry rather than a hard error.
+
+### @mention resolution
+
+```markdown
+cc @[alice@example.com] and @[Alice Smith] for review
+```
+
+Query forms accepted inside `@[...]`:
+- Full accountId (long alphanumeric, skips the user-search round-trip)
+- Email address (resolved by exact match)
+- Display name or substring (exact case-insensitive match wins over
+  partial matches; a single partial match is accepted; multiple partial
+  matches error with the candidate list so you can disambiguate)
+
+Resolved mentions are returned in `data.resolved_mentions[]` with the
+original query, the resolved accountId, and the display name.
+Mentions inside marked text (bold, italic, code) are intentionally
+left as plain text because ADF mention nodes don't support marks —
+splitting a marked run would silently drop formatting.
+
+### Exotic ADF nodes (escape hatch)
+
+```markdown
+```adf:panel
+{"type":"panel","attrs":{"panelType":"info"},"content":[
+  {"type":"paragraph","content":[{"type":"text","text":"heads up"}]}
+]}
+```
+```
+
+Any ADF node type you can't express in standard markdown can be written
+as a fenced code block with info string `adf:<type>` and a body of raw
+JSON. The converter re-inflates the node verbatim on both directions,
+and fence length auto-scales so nested backticks inside the JSON
+can't break out.
 
 ## Common workflows
 
@@ -129,12 +209,29 @@ Output: `{"path": "...", "size": ..., "mime": "..."}`. A `warnings[]`
 entry is added when the mime type is unlikely to be directly readable
 (use a dedicated parser for those).
 
+Server-supplied filenames are path-traversal-safe: only the final
+component is kept, `.` / `..` / empty names are rejected, and the
+writer refuses to overwrite a pre-existing symlink at the target.
+
 ### Post a markdown comment on a Jira ticket
 
 ```sh
-jc jira issue comment add FOO-123 --body-file note.md --dry-run
-jc jira issue comment add FOO-123 --body-file note.md
+cat > /tmp/note.md <<'EOF'
+# Investigation
+
+Root cause: the retry count is off-by-one.
+
+cc @[alice@example.com]
+
+![repro](./repro.png)
+EOF
+
+jc jira issue comment add FOO-123 --body-file /tmp/note.md --dry-run
+jc jira issue comment add FOO-123 --body-file /tmp/note.md
 ```
+
+The dry-run shows the planned preview; the real send uploads the
+image, resolves the mention, and attaches the result to the comment.
 
 Also available: `comment list <KEY>`, `comment edit <KEY> <ID>
 --body-file ...` (shows diff), `comment delete <KEY> <ID>`.
@@ -208,6 +305,10 @@ failure (page created, comment failed) surfaces the failure as a
 `warnings[]` entry rather than a hard error — the page exists and the
 linking step can be retried.
 
+If the markdown contains local images, they're uploaded to the new
+page after step 1 and the body is updated with the real attachment
+refs as part of the same invocation.
+
 ### Confluence pages
 
 ```sh
@@ -242,12 +343,15 @@ Both auto-paginate (cursor for JQL, start/limit for CQL).
 any time. `--field KEY=VALUE` accepts either human names or raw
 `customfield_*` IDs.
 
-## Rate limits
+## Rate limits and retries
 
-Atlassian uses dynamic cost-based rate limiting with 429 + `Retry-After`.
-The HTTP layer returns structured errors on non-2xx; callers surface
-them as JSON on stderr. Manual retry for now; automated backoff is a
-planned follow-up.
+Atlassian uses dynamic cost-based rate limiting. `jc` handles 429s
+automatically: up to 4 attempts per request with `Retry-After` honored
+(capped at 120s — beyond that the CLI gives up and surfaces the error
+so you can rerun later). Reads (GET / HEAD / download) also retry on
+502/503/504; mutations (POST/PUT/DELETE) only retry on 429 to avoid
+double-committing when a 5xx indicates partial processing. Multipart
+uploads are single-attempt because the request body can't be rebuilt.
 
 ## What `jc` intentionally does NOT do
 

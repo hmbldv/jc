@@ -39,7 +39,9 @@ secondary.
 
 **Markdown as input.** Users and agents write markdown. `jc` converts to ADF
 (Atlassian Document Format) internally before sending. The markdown↔ADF
-converter is the load-bearing piece of the whole tool.
+converter is the load-bearing piece of the whole tool. Rich content that
+can't be expressed in plain markdown — local images, typed user mentions —
+is handled by pre-processors in the CLI layer that run before the converter.
 
 **Dry-run by default for humans.** Every mutation supports `--dry-run`
 (preview only) and `--confirm` (preview + stdin y/N). For Claude Code, the
@@ -57,6 +59,13 @@ limitations.
 **No MCP surface.** CLI only. Claude Code shells out, the way it does to
 `gh` and `glab`. MCP has been a friction point; the CLI boundary is cleaner.
 
+**Bounded automatic retry.** Atlassian rate-limits with 429 + `Retry-After`.
+`jc` retries transient failures up to a fixed cap (4 attempts) with a
+120-second circuit breaker on wait time, honoring `Retry-After` when
+present and exponential backoff otherwise. Reads and mutations use
+different policies: reads retry on 429 + 502/503/504; mutations retry
+only on 429 so a partially-processed 5xx doesn't double-commit.
+
 ## 3. Architecture at a glance
 
 Cargo workspace, single binary, five crates:
@@ -64,8 +73,9 @@ Cargo workspace, single binary, five crates:
 ```
 jc/
 ├── crates/
-│   ├── jc/         # binary: clap CLI, config, preview/dry-run, logging
-│   ├── jc-core/    # shared: reqwest client, auth, errors, cache
+│   ├── jc/         # binary: clap CLI, config, preview/dry-run, logging,
+│   │               #   markdown pre-processors (images + mentions)
+│   ├── jc-core/    # shared: reqwest client, retry, auth, errors, cache
 │   ├── jc-adf/     # pure markdown <-> ADF converter
 │   ├── jc-jira/    # Jira Cloud REST v3 typed client
 │   └── jc-conf/    # Confluence Cloud REST v2 typed client
@@ -82,6 +92,8 @@ jc/
   boundary, preventing retry/auth/cache logic from leaking product assumptions.
 - `jc-jira` and `jc-conf` are independent typed clients that share `jc-core`
   and `jc-adf`. Either could be replaced without touching the other.
+- The `jc` binary crate is the only place that knows how to compose images,
+  mentions, and the preview harness across products. Pure crates stay pure.
 
 ## 4. The ADF problem and how we solved it
 
@@ -117,10 +129,10 @@ markdown↔ADF converter can serve both products**.
 | Bullet and ordered lists (with tight-list handling) | ✅ | ✅ |
 | Code blocks with language hints | ✅ | ✅ |
 | Blockquotes, horizontal rules, hard breaks | ✅ | ✅ |
-| **GFM tables** (header + body, inline marks in cells) | ✅ | ✅ |
-| `@user` mentions | ✅ (rendered as `@name`) | ➖ (emitted as plain text) |
-| `mediaSingle` images | ✅ (rendered as `![alt](attachment:ID)`) | ➖ (treated as links) |
-| `inlineCard`, `emoji` | ✅ | ➖ |
+| GFM tables (header + body, inline marks in cells) | ✅ | ✅ |
+| `mediaSingle` images | ✅ (rendered as `![alt](attachment:ID)`) | ✅ (via CLI-layer pre-processor that uploads local files and rewrites to `attachment:` URLs before conversion) |
+| Typed `@user` mentions | ✅ (rendered as `@name`) | ✅ (via CLI-layer pre-processor that resolves `@[query]` to a real accountId and post-processes the ADF to emit `mention` inline nodes) |
+| `inlineCard`, `emoji` | ✅ | ➖ (passthrough as plain text) |
 | Exotic nodes (panel, status, expand, layout, decisionList, etc.) | ✅ via ` ```adf:<type>` escape hatch | ✅ via ` ```adf:<type>` escape hatch |
 
 The "nothing silently dropped" rule is non-negotiable. When the converter
@@ -128,24 +140,43 @@ can't cleanly represent a node, it escapes it to a fenced code block whose
 info string is `adf:<type>` and whose body is the raw ADF JSON. On the
 reverse trip, `adf:*` fenced blocks re-inflate verbatim, so exotic content
 round-trips losslessly even though explicit support hasn't been written.
+Fence length auto-scales based on the longest backtick run in the
+serialized JSON so nested backticks can't break out of the escape hatch.
 
 Table caveats: ADF doesn't model per-column alignment, so the alignment
 row in GFM input is discarded. ADF → GFM always emits left-aligned
-separators. Pipes inside cell text are escaped as `\|`; newlines within
-a cell are collapsed to a single space.
+separators. Pipes and backslashes inside cell text are escaped (`\|`,
+`\\`); newlines within a cell are collapsed to a single space.
 
-Not yet implemented on the write path: generated table of contents, typed
-user mentions (with async accountId lookup), and the inline-image upload
-pipeline. Callers that need any of those today can use the escape hatch.
+Image caveats: the pre-processor handles `![alt](path)` syntax where
+`path` is a local file. Relative paths resolve against the markdown
+file's parent directory (not CWD). On edit commands the upload runs
+after the confirmation gate so a cancelled `--confirm` leaves no
+orphans; on create commands the flow is two-phase (create, then upload,
+then follow-up edit), with partial-failure surfacing as a `warnings[]`
+entry rather than a hard error.
+
+Mention caveats: `@[query]` is resolved via user search. An exact
+display-name or email match wins over partial matches; a single partial
+match is accepted; multiple partial matches without a tiebreaker error
+with the full candidate list so the user can disambiguate. Mentions
+inside marked text (bold, italic, code) are intentionally left as
+literal text because ADF mention nodes don't support marks.
+
+Not yet implemented on the write path: generated `tableOfContents`
+node from markdown syntax (round-trips today via the escape hatch).
 
 ## 5. The dry-run / preview model
 
 Every mutation command has three modes:
 
 1. **`--dry-run`** — serializes the exact HTTP request (method, URL, redacted
-   headers, body) as JSON, writes it to stdout, exits 0. No HTTP call.
+   headers, body) as JSON, writes it to stdout, exits 0. No mutating HTTP
+   call. Read-only preflight calls (resolving a space key, resolving a
+   mention query) still run so the preview reflects the real request.
 2. **`--confirm`** — renders the preview, blocks on stdin for `y/N`, then
-   sends. For interactive humans only.
+   sends. Errors immediately if stdin is not a TTY so piped invocations
+   don't silently decline every prompt.
 3. **default** — sends it. For Claude Code acting with explicit upstream
    authorization.
 
@@ -159,15 +190,22 @@ payload. This is what makes "append my own considerations before pushing"
 actually reviewable — the user sees what is changing in human terms, not as
 an unreadable ADF tree diff.
 
+**For commands whose markdown body includes local images**, the dry-run
+preview shows the original markdown (local paths intact) and lists each
+image that *would* be uploaded in the `warnings[]` array. Uploads only
+happen on real send so the preview is side-effect-free.
+
 ## 6. Auth and config
 
 **Primary:** env vars — `JC_SITE`, `JC_EMAIL`, `JC_TOKEN`. Simplest to wire
 up for both Claude Code and CI.
 
-**Fallback:** OS keychain via the `keyring` crate (service `jc`, accounts
-`site` / `email` / `token`). Populate with `jc config set <key> <value>`.
-Env vars win when both are set. `jc config show` reports the sources it
-actually used so you can tell where credentials came from.
+**Fallback:** OS keychain via the `keyring` crate (service
+`dev.hmbldv.jc`, accounts `site` / `email` / `token`). Populate with
+`jc config set <key> <value>`. Pass `-` as the value to read from stdin
+so the token stays out of shell history. Env vars win when both are
+set. `jc config show` reports the sources it actually used so you can
+tell where credentials came from.
 
 **Verification:** `jc config test` calls `/rest/api/3/myself` and reports
 the authenticated user. Run this first in any new session.
@@ -203,16 +241,30 @@ binary would muddy the concerns and make both halves worse.
 
 ## 9. Testing strategy
 
-- **Unit tests today (41 total, all passing):**
-  - `jc-adf`: 25 tests covering to_adf, from_adf, round-trip, and the
-    `adf:<type>` escape hatch
-  - `jc-jira::jql`: 9 tests covering the JQL builder and string escaping
-  - `jc-jira::transitions`: 7 tests covering the fuzzy matcher's unique,
-    exact-wins-over-contains, ambiguous, and not-found branches
-- **Recorded fixtures** — planned. HTTP responses captured once, replayed
-  in integration tests for `jc-jira` and `jc-conf`.
-- **Live integration tests** — deferred until a second machine is
-  available to hit a real Atlassian sandbox site in isolation.
+**Unit tests today: 95 total, all passing.**
+
+- `jc-adf` (34): to_adf, from_adf, GFM tables both sides, round-trip,
+  `adf:<type>` escape hatch with fence-length auto-scaling, backslash
+  and pipe escaping in table cells.
+- `jc-core` (19): `RetryPolicy` matrix (Read / IdempotencySafe / None)
+  across HTTP statuses, exponential backoff schedule and overflow cap,
+  literal-escape round-trip and backslash-before-quote ordering,
+  relative-time allow-list, URL query scrubbing.
+- `jc-jira` (13): JQL builder (eq / contains / raw / order_by), string
+  escaping, transition fuzzy matcher (unique / ambiguous / not-found /
+  exact-wins-over-contains).
+- `jc` binary (29): control-character sanitization for TTY output,
+  markdown image finder (local/remote classification, dedup, absolute
+  paths, rewrite), markdown mention resolver (token finding, accountId
+  heuristic, rewrite, ADF tree splitting, marked-text skip).
+
+**Recorded fixtures** — planned. HTTP responses captured once, replayed
+in integration tests for `jc-jira` and `jc-conf`.
+
+**Live integration tests** — deferred until a second machine is
+available to hit a real Atlassian sandbox site in isolation.
+
+`cargo clippy --all-targets` is clean.
 
 ## 10. Toolchain
 
@@ -221,7 +273,8 @@ binary would muddy the concerns and make both halves worse.
 - `tokio` for async
 - `clap` v4 with derive
 - `serde` / `serde_json`
-- `pulldown-cmark` for markdown parsing
+- `pulldown-cmark` for markdown parsing (used by both `jc-adf` and the
+  `jc` crate's image/mention pre-processors)
 - `keyring` for OS keychain
 - `anyhow` at the binary boundary, `thiserror` in library crates
 - `tracing` + `tracing-subscriber` for the `--verbose` HTTP log

@@ -2,13 +2,19 @@
 //!
 //! Event-driven walker over pulldown-cmark. A small frame stack tracks
 //! open block containers (doc, paragraph, heading, lists, blockquote,
-//! code block), and a parallel marks stack tracks inline decorations
-//! (strong, em, code, strike, link).
+//! code block, GFM tables), and a parallel marks stack tracks inline
+//! decorations (strong, em, code, strike, link).
 //!
 //! Fenced code blocks whose language starts with `adf:` are the escape
 //! hatch — their body is parsed as JSON and emitted as a raw ADF node,
 //! which is how exotic nodes like panels and status lozenges round-trip
 //! losslessly through `from_adf -> to_adf`.
+//!
+//! GFM table alignment is not represented in ADF (Confluence tables have
+//! no per-column alignment in the core model), so that information is
+//! dropped on the write path. Everything else in a GFM table round-trips
+//! cleanly: headers become `tableHeader`, body cells become `tableCell`,
+//! inline marks inside cells are preserved.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
@@ -18,6 +24,7 @@ use crate::AdfDocument;
 pub fn to_adf(md: &str) -> AdfDocument {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(md, opts);
 
     let mut stack: Vec<Frame> = vec![Frame::Doc(Vec::new())];
@@ -65,6 +72,10 @@ enum Frame {
     Item(Vec<Value>),
     Blockquote(Vec<Value>),
     CodeBlock { lang: String, text: String },
+    Table(Vec<Value>),
+    TableHead(Vec<Value>),
+    TableRow(Vec<Value>),
+    TableCell { is_header: bool, content: Vec<Value> },
 }
 
 fn handle_start(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, tag: Tag) {
@@ -104,6 +115,19 @@ fn handle_start(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, tag: Tag) {
                 "attrs": {"href": dest_url.to_string()}
             }));
         }
+        Tag::Table(_) => {
+            // pulldown-cmark emits Vec<Alignment> here; we drop it because
+            // ADF tables don't model column alignment.
+            stack.push(Frame::Table(Vec::new()));
+        }
+        Tag::TableHead => stack.push(Frame::TableHead(Vec::new())),
+        Tag::TableRow => stack.push(Frame::TableRow(Vec::new())),
+        Tag::TableCell => {
+            // Cells inside a TableHead become tableHeader nodes; cells
+            // inside a TableRow become tableCell nodes.
+            let is_header = matches!(stack.last(), Some(Frame::TableHead(_)));
+            stack.push(Frame::TableCell { is_header, content: Vec::new() });
+        }
         _ => {}
     }
 }
@@ -117,9 +141,10 @@ fn handle_end(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, end: TagEnd) {
         | TagEnd::Image => {
             marks.pop();
         }
-        TagEnd::Item => {
-            // Tight list items skip the Paragraph wrapper; we may have an
-            // implicit paragraph still open from push_inline. Close it first.
+        TagEnd::Item | TagEnd::TableCell => {
+            // Tight list items and GFM table cells skip the Paragraph
+            // wrapper around their inline content; close the implicit
+            // paragraph opened by push_inline before closing the cell/item.
             if matches!(stack.last(), Some(Frame::Paragraph(_))) {
                 let node = close_frame(stack);
                 push_block(stack, node);
@@ -133,7 +158,10 @@ fn handle_end(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, end: TagEnd) {
         | TagEnd::Heading(_)
         | TagEnd::BlockQuote(_)
         | TagEnd::CodeBlock
-        | TagEnd::List(_) => {
+        | TagEnd::List(_)
+        | TagEnd::Table
+        | TagEnd::TableHead
+        | TagEnd::TableRow => {
             if stack.len() > 1 {
                 let node = close_frame(stack);
                 push_block(stack, node);
@@ -174,17 +202,55 @@ fn close_frame(stack: &mut Vec<Frame>) -> Value {
                 "content": [{"type": "text", "text": content_text}]
             })
         }
+        Frame::Table(rows) => json!({
+            "type": "table",
+            "attrs": {
+                "isNumberColumnEnabled": false,
+                "layout": "default",
+            },
+            "content": rows,
+        }),
+        // Both TableHead and TableRow close into an ADF tableRow; the cell
+        // type is what distinguishes header from body.
+        Frame::TableHead(cells) => json!({
+            "type": "tableRow",
+            "content": cells,
+        }),
+        Frame::TableRow(cells) => json!({
+            "type": "tableRow",
+            "content": cells,
+        }),
+        Frame::TableCell { is_header, content } => {
+            let node_type = if is_header { "tableHeader" } else { "tableCell" };
+            // ADF table cells expect block children (paragraphs). The
+            // implicit-paragraph handling in push_inline / TagEnd::TableCell
+            // already ensures `content` is a Vec of block nodes.
+            json!({
+                "type": node_type,
+                "attrs": {},
+                "content": content,
+            })
+        }
     }
 }
 
 fn push_block(stack: &mut Vec<Frame>, node: Value) {
+    // TableCell has a struct-variant shape; handle separately from the
+    // tuple variants below.
+    if let Some(Frame::TableCell { content, .. }) = stack.last_mut() {
+        content.push(node);
+        return;
+    }
     if let Some(top) = stack.last_mut() {
         let container = match top {
             Frame::Doc(v)
             | Frame::BulletList(v)
             | Frame::OrderedList(v)
             | Frame::Item(v)
-            | Frame::Blockquote(v) => v,
+            | Frame::Blockquote(v)
+            | Frame::Table(v)
+            | Frame::TableHead(v)
+            | Frame::TableRow(v) => v,
             _ => return,
         };
         container.push(node);
@@ -202,11 +268,13 @@ fn push_inline(stack: &mut Vec<Frame>, node: Value) {
         Some(Frame::Paragraph(v)) | Some(Frame::Heading(_, v)) => {
             v.push(node);
         }
-        // Tight list items land here: pulldown-cmark emits Text directly
-        // inside Item without a surrounding Paragraph. Open an implicit
-        // paragraph so ADF stays well-formed (listItem requires a block
-        // child). TagEnd::Item closes this before closing the item itself.
-        Some(Frame::Item(_)) => {
+        // Tight list items and table cells land here: pulldown-cmark emits
+        // Text directly inside Item / TableCell without a surrounding
+        // Paragraph. Open an implicit paragraph so ADF stays well-formed
+        // (both listItem and table cells require block children).
+        // TagEnd::Item / TagEnd::TableCell close this before closing the
+        // cell/item itself.
+        Some(Frame::Item(_)) | Some(Frame::TableCell { .. }) => {
             stack.push(Frame::Paragraph(vec![node]));
         }
         _ => {}
@@ -325,5 +393,73 @@ mod tests {
         let md = "```adf:panel\nnot valid json\n```\n";
         let adf = to_adf(md);
         assert_eq!(adf["content"][0]["type"], "codeBlock");
+    }
+
+    #[test]
+    fn simple_gfm_table() {
+        let md = "| Col 1 | Col 2 |\n| --- | --- |\n| a | b |\n| c | d |\n";
+        let adf = to_adf(md);
+
+        let table = &adf["content"][0];
+        assert_eq!(table["type"], "table");
+        assert_eq!(table["attrs"]["isNumberColumnEnabled"], false);
+
+        let rows = table["content"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "head row + 2 body rows");
+
+        // Header row: all cells are tableHeader
+        let head_cells = rows[0]["content"].as_array().unwrap();
+        assert_eq!(head_cells.len(), 2);
+        assert_eq!(head_cells[0]["type"], "tableHeader");
+        assert_eq!(head_cells[1]["type"], "tableHeader");
+        assert_eq!(
+            head_cells[0]["content"][0]["content"][0]["text"],
+            "Col 1"
+        );
+
+        // Body rows: all cells are tableCell
+        let body_cells = rows[1]["content"].as_array().unwrap();
+        assert_eq!(body_cells[0]["type"], "tableCell");
+        assert_eq!(body_cells[0]["content"][0]["type"], "paragraph");
+        assert_eq!(
+            body_cells[0]["content"][0]["content"][0]["text"],
+            "a"
+        );
+    }
+
+    #[test]
+    fn table_preserves_inline_marks() {
+        let md = "| Name | Status |\n| --- | --- |\n| **bold** | `code` |\n";
+        let adf = to_adf(md);
+
+        let cell = &adf["content"][0]["content"][1]["content"][0];
+        assert_eq!(cell["type"], "tableCell");
+        let para = &cell["content"][0];
+        assert_eq!(para["type"], "paragraph");
+        let text = &para["content"][0];
+        assert_eq!(text["text"], "bold");
+        assert_eq!(text["marks"][0]["type"], "strong");
+
+        let cell2 = &adf["content"][0]["content"][1]["content"][1];
+        let text2 = &cell2["content"][0]["content"][0];
+        assert_eq!(text2["text"], "code");
+        assert_eq!(text2["marks"][0]["type"], "code");
+    }
+
+    #[test]
+    fn roundtrip_simple_table() {
+        let md = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+        let out = roundtrip(md);
+        assert!(out.contains("| A | B |"), "missing header: {out}");
+        assert!(out.contains("| --- | --- |"), "missing separator: {out}");
+        assert!(out.contains("| 1 | 2 |"), "missing body: {out}");
+    }
+
+    #[test]
+    fn roundtrip_table_with_marks() {
+        let md = "| Name | Score |\n| --- | --- |\n| **Alice** | *42* |\n";
+        let out = roundtrip(md);
+        assert!(out.contains("**Alice**"));
+        assert!(out.contains("*42*"));
     }
 }

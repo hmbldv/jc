@@ -115,13 +115,15 @@ Cargo workspace, five crates:
 ## Status
 
 All commands listed above are implemented end to end. The markdown↔ADF
-converter is covered by 25 unit tests including round-trip and escape-hatch
-cases; the JQL builder and transition matcher add another 16 tests. What's
-deliberately deferred: automated 429 backoff, multi-site `--profile`
-switching, live integration tests, and richer ADF elements in the converter
-(GFM tables, generated TOC, typed user mentions on the write path, inline
-image upload pipeline). Exotic ADF nodes round-trip losslessly via the
-`adf:<type>` fenced-block escape hatch regardless of explicit support.
+converter has 31 unit tests including round-trip, GFM table, and escape-
+hatch cases; `jc-core` adds 9 tests (literal escaping, time validation,
+URL scrub); sanitize, JQL builder, and transition matcher add the rest.
+Total: 58 unit tests, all passing. What's deliberately deferred: automated
+429 backoff, multi-site `--profile` switching, live integration tests,
+and the remaining write-path ADF elements (generated TOC, typed user
+mentions, inline image upload pipeline). Exotic ADF nodes round-trip
+losslessly via the `adf:<type>` fenced-block escape hatch regardless of
+explicit support.
 
 ## License
 

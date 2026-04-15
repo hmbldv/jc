@@ -117,6 +117,7 @@ markdown↔ADF converter can serve both products**.
 | Bullet and ordered lists (with tight-list handling) | ✅ | ✅ |
 | Code blocks with language hints | ✅ | ✅ |
 | Blockquotes, horizontal rules, hard breaks | ✅ | ✅ |
+| **GFM tables** (header + body, inline marks in cells) | ✅ | ✅ |
 | `@user` mentions | ✅ (rendered as `@name`) | ➖ (emitted as plain text) |
 | `mediaSingle` images | ✅ (rendered as `![alt](attachment:ID)`) | ➖ (treated as links) |
 | `inlineCard`, `emoji` | ✅ | ➖ |
@@ -128,10 +129,14 @@ info string is `adf:<type>` and whose body is the raw ADF JSON. On the
 reverse trip, `adf:*` fenced blocks re-inflate verbatim, so exotic content
 round-trips losslessly even though explicit support hasn't been written.
 
-Not yet implemented on the write path: GFM tables, generated table of
-contents, typed user mentions (with async accountId lookup), and the
-inline-image upload pipeline. Callers that need any of those today can
-use the escape hatch.
+Table caveats: ADF doesn't model per-column alignment, so the alignment
+row in GFM input is discarded. ADF → GFM always emits left-aligned
+separators. Pipes inside cell text are escaped as `\|`; newlines within
+a cell are collapsed to a single space.
+
+Not yet implemented on the write path: generated table of contents, typed
+user mentions (with async accountId lookup), and the inline-image upload
+pipeline. Callers that need any of those today can use the escape hatch.
 
 ## 5. The dry-run / preview model
 

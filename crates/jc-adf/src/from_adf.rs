@@ -96,8 +96,104 @@ fn render_block(node: &Value, out: &mut String, depth: usize) {
                 }
             }
         }
+        "table" => render_table(node, out),
         _ => render_unknown_block(node, out),
     }
+}
+
+/// Render an ADF table as a GFM pipe table.
+///
+/// ADF doesn't model column alignment, so separators are always left-
+/// aligned `---`. If the first row has all `tableHeader` cells we use it
+/// as the GFM header; otherwise we synthesize an empty header row so the
+/// output is still valid GFM (which requires a header).
+fn render_table(node: &Value, out: &mut String) {
+    let Some(rows) = node.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    if rows.is_empty() {
+        return;
+    }
+
+    let first_cells = rows[0].get("content").and_then(Value::as_array);
+    let ncols = first_cells.map(|c| c.len()).unwrap_or(0);
+    if ncols == 0 {
+        return;
+    }
+    let first_is_header = first_cells
+        .map(|cells| cells.iter().all(|c| node_type(c) == "tableHeader"))
+        .unwrap_or(false);
+
+    // Header
+    if first_is_header {
+        render_table_row(&rows[0], out);
+    } else {
+        out.push('|');
+        for _ in 0..ncols {
+            out.push_str("   |");
+        }
+        out.push('\n');
+    }
+
+    // Separator
+    out.push('|');
+    for _ in 0..ncols {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+
+    // Body
+    let body_start = if first_is_header { 1 } else { 0 };
+    for row in &rows[body_start..] {
+        render_table_row(row, out);
+    }
+}
+
+fn render_table_row(row: &Value, out: &mut String) {
+    out.push('|');
+    let Some(cells) = row.get("content").and_then(Value::as_array) else {
+        out.push('\n');
+        return;
+    };
+    for cell in cells {
+        let mut cell_text = String::new();
+        render_cell_inline(cell, &mut cell_text);
+        out.push(' ');
+        out.push_str(&escape_table_cell(&cell_text));
+        out.push_str(" |");
+    }
+    out.push('\n');
+}
+
+/// Flatten an ADF table cell's content into inline markdown. Cells hold
+/// paragraphs in the ADF model; GFM table cells only support inline
+/// content, so multiple paragraphs are joined with a single space.
+fn render_cell_inline(cell: &Value, out: &mut String) {
+    let Some(content) = cell.get("content").and_then(Value::as_array) else {
+        return;
+    };
+    for (i, block) in content.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        if node_type(block) == "paragraph" {
+            render_inlines(block, out);
+        }
+    }
+}
+
+/// Escape GFM table cell content: pipes become `\|`, and any embedded
+/// newlines become spaces (GFM tables are single-line per cell).
+fn escape_table_cell(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn render_list(node: &Value, out: &mut String, depth: usize, ordered: bool) {
@@ -433,5 +529,82 @@ mod tests {
             ]
         }]));
         assert_eq!(to_markdown(&d), "> quoted\n");
+    }
+
+    #[test]
+    fn table_with_header_and_body() {
+        let d = doc(json!([{
+            "type": "table",
+            "attrs": {"isNumberColumnEnabled": false, "layout": "default"},
+            "content": [
+                {
+                    "type": "tableRow",
+                    "content": [
+                        {
+                            "type": "tableHeader",
+                            "attrs": {},
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Name"}]
+                            }]
+                        },
+                        {
+                            "type": "tableHeader",
+                            "attrs": {},
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Score"}]
+                            }]
+                        }
+                    ]
+                },
+                {
+                    "type": "tableRow",
+                    "content": [
+                        {
+                            "type": "tableCell",
+                            "attrs": {},
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Alice"}]
+                            }]
+                        },
+                        {
+                            "type": "tableCell",
+                            "attrs": {},
+                            "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "42"}]
+                            }]
+                        }
+                    ]
+                }
+            ]
+        }]));
+        let md = to_markdown(&d);
+        assert!(md.contains("| Name | Score |"), "got: {md}");
+        assert!(md.contains("| --- | --- |"), "got: {md}");
+        assert!(md.contains("| Alice | 42 |"), "got: {md}");
+    }
+
+    #[test]
+    fn table_cell_escapes_pipe() {
+        let d = doc(json!([{
+            "type": "table",
+            "content": [
+                {"type": "tableRow", "content": [
+                    {"type": "tableHeader", "attrs": {}, "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Raw"}]}
+                    ]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "attrs": {}, "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "a|b"}]}
+                    ]}
+                ]}
+            ]
+        }]));
+        let md = to_markdown(&d);
+        assert!(md.contains("| a\\|b |"), "pipe not escaped: {md}");
     }
 }

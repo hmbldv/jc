@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod logging;
 mod markdown_images;
+mod markdown_mentions;
 mod output;
 mod preview;
 mod sanitize;

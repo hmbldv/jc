@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use jc_core::Client;
@@ -14,6 +15,10 @@ use crate::cli::{
 };
 use crate::config::Config;
 use crate::markdown_images::{FoundImage, find_local_images, rewrite_image_urls};
+use crate::markdown_mentions::{
+    ResolvedMention, apply_mentions_to_adf, find_mention_queries, resolve_mentions,
+    rewrite_mentions,
+};
 use crate::output::{CliError, Envelope};
 use crate::preview::{Preview, PreviewMode, emit_composite_dry_run, prompt_yes_no};
 
@@ -396,12 +401,16 @@ async fn jira_comment_add(
     let images = find_local_images(&md, base_dir);
 
     let cfg = Config::from_env()?;
+    let client = cfg.jira_client()?;
+    let mentions = resolve_mentions_for(&client, &md).await?;
+
     let url = format!("https://{}/rest/api/3/issue/{}/comment", cfg.site, key);
 
     // Preview is built from the ORIGINAL markdown (local image paths
-    // still intact). The upload+rewrite happens after the confirmation
-    // gate so a cancelled --confirm doesn't leave orphaned attachments.
-    let preview_adf = jc_adf::to_adf(&md);
+    // still intact) with mentions already resolved. Upload+rewrite
+    // happens after the confirmation gate so a cancelled --confirm
+    // doesn't leave orphaned attachments.
+    let preview_adf = compile_adf(&md, &mentions);
     let preview = Preview::new("POST", url)
         .with_body(json!({ "body": preview_adf }))
         .with_summary(format!("Add comment to {key}"));
@@ -421,11 +430,10 @@ async fn jira_comment_add(
         PreviewMode::Send => {}
     }
 
-    let client = cfg.jira_client()?;
     let (replacements, uploaded) =
         upload_images_for_jira_issue(&client, key, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
-    let final_adf = jc_adf::to_adf(&final_md);
+    let final_adf = compile_adf(&final_md, &mentions);
 
     let comment = jc_jira::comment::add(&client, key, &final_adf).await?;
 
@@ -434,10 +442,15 @@ async fn jira_comment_add(
         "created": comment.created,
         "author": comment.author.as_ref().map(|u| &u.display_name),
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     if !uploaded.is_empty() {
         env.warnings
             .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    if !mentions.is_empty() {
+        env.warnings
+            .push(format!("resolved {} mention(s)", mentions.len()));
     }
     env.emit();
     Ok(())
@@ -487,13 +500,14 @@ async fn jira_comment_edit(
     let base_dir = base_dir_of(body_file);
     let images = find_local_images(&md, base_dir);
 
-    // Convert the ORIGINAL md for preview; real upload+rewrite happens
-    // after the confirmation gate.
-    let preview_adf = jc_adf::to_adf(&md);
-    let preview_markdown = jc_adf::to_markdown(&preview_adf);
-
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
+    let mentions = resolve_mentions_for(&client, &md).await?;
+
+    // Convert the ORIGINAL md (with mentions resolved) for preview;
+    // real upload+rewrite happens after the confirmation gate.
+    let preview_adf = compile_adf(&md, &mentions);
+    let preview_markdown = jc_adf::to_markdown(&preview_adf);
 
     // Fetch current state for the diff preview.
     let current = jc_jira::comment::get(&client, key, comment_id).await?;
@@ -532,7 +546,7 @@ async fn jira_comment_edit(
     let (replacements, uploaded) =
         upload_images_for_jira_issue(&client, key, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
-    let final_adf = jc_adf::to_adf(&final_md);
+    let final_adf = compile_adf(&final_md, &mentions);
 
     let updated = jc_jira::comment::edit(&client, key, comment_id, &final_adf).await?;
     let mut env = Envelope::new(json!({
@@ -540,10 +554,15 @@ async fn jira_comment_edit(
         "updated": updated.updated,
         "author": updated.author.as_ref().map(|u| &u.display_name),
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     if !uploaded.is_empty() {
         env.warnings
             .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    if !mentions.is_empty() {
+        env.warnings
+            .push(format!("resolved {} mention(s)", mentions.len()));
     }
     env.emit();
     Ok(())
@@ -947,6 +966,41 @@ fn base_dir_of(file: &Path) -> &Path {
     file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
 }
 
+/// Resolve every `@[query]` token in `md` via the user search API.
+/// Returns an empty map when the source has no mentions so the caller
+/// can skip the API round-trip entirely for the common case.
+async fn resolve_mentions_for(
+    client: &Client,
+    md: &str,
+) -> Result<BTreeMap<String, ResolvedMention>, CliError> {
+    let queries = find_mention_queries(md);
+    if queries.is_empty() {
+        Ok(BTreeMap::new())
+    } else {
+        resolve_mentions(client, &queries).await
+    }
+}
+
+/// Compile a markdown body into ADF with mentions resolved.
+///
+/// Order of operations:
+/// 1. `rewrite_mentions` normalizes each `@[query]` token to
+///    `@[accountId]` using the resolution map.
+/// 2. `jc_adf::to_adf` runs the standard markdown → ADF conversion.
+/// 3. `apply_mentions_to_adf` walks the ADF tree and splits
+///    `@[accountId]` tokens inside unmarked text nodes into proper
+///    `mention` inline nodes.
+///
+/// This is called once to build the preview (before images are
+/// uploaded) and again to build the final payload (after image URLs
+/// have been rewritten to `attachment:` form).
+fn compile_adf(md: &str, mentions: &BTreeMap<String, ResolvedMention>) -> Value {
+    let rewritten = rewrite_mentions(md, mentions);
+    let mut adf = jc_adf::to_adf(&rewritten);
+    apply_mentions_to_adf(&mut adf, mentions);
+    adf
+}
+
 fn guess_mime_from_ext(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
@@ -1062,13 +1116,15 @@ async fn conf_page_create(
     let base_dir = base_dir_of(body_file);
     let images = find_local_images(&md, base_dir);
 
-    // Phase 1 ADF: convert original md (local image paths still intact
-    // as link marks). Uploads happen after create.
-    let initial_adf = jc_adf::to_adf(&md);
-
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
+    let mentions = resolve_mentions_for(&client, &md).await?;
     let space_id = jc_conf::space::resolve_id(&client, space_key).await?;
+
+    // Phase 1 ADF: convert original md (local image paths still intact
+    // as link marks) with mentions already resolved. Uploads happen
+    // after create.
+    let initial_adf = compile_adf(&md, &mentions);
 
     let req = jc_conf::page::CreatePageRequest {
         space_id: &space_id,
@@ -1109,7 +1165,7 @@ async fn conf_page_create(
     let mut warnings: Vec<String> = Vec::new();
     let final_version = if !replacements.is_empty() {
         let rewritten = rewrite_image_urls(&md, &replacements);
-        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let fixed_adf = compile_adf(&rewritten, &mentions);
         let current_version = page.version.as_ref().map(|v| v.number).unwrap_or(1);
         let next_version = current_version + 1;
         let update_req = jc_conf::page::UpdatePageRequest {
@@ -1140,6 +1196,9 @@ async fn conf_page_create(
     } else {
         page.version.as_ref().map(|v| v.number)
     };
+    if !mentions.is_empty() {
+        warnings.push(format!("resolved {} mention(s)", mentions.len()));
+    }
 
     let mut env = Envelope::new(json!({
         "id": page.id,
@@ -1148,6 +1207,7 @@ async fn conf_page_create(
         "parent_id": page.parent_id,
         "version": final_version,
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     env.warnings = warnings;
     env.emit();
@@ -1173,13 +1233,14 @@ async fn conf_page_update(
     let base_dir = base_dir_of(body_file);
     let images = find_local_images(&md, base_dir);
 
-    // Convert original md for the preview (local image URLs intact).
-    // Upload+rewrite happens after confirmation.
-    let preview_adf = jc_adf::to_adf(&md);
-    let preview_markdown = jc_adf::to_markdown(&preview_adf);
-
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
+    let mentions = resolve_mentions_for(&client, &md).await?;
+
+    // Convert original md (with mentions resolved) for the preview.
+    // Upload+rewrite happens after confirmation.
+    let preview_adf = compile_adf(&md, &mentions);
+    let preview_markdown = jc_adf::to_markdown(&preview_adf);
 
     // Fetch current page to obtain version + existing title + current body.
     let current = jc_conf::page::get(&client, id).await?;
@@ -1238,7 +1299,7 @@ async fn conf_page_update(
     let (replacements, uploaded) =
         upload_images_for_conf_page(&client, id, &images).await?;
     let final_md = rewrite_image_urls(&md, &replacements);
-    let final_adf = jc_adf::to_adf(&final_md);
+    let final_adf = compile_adf(&final_md, &mentions);
 
     let final_req = jc_conf::page::UpdatePageRequest {
         id,
@@ -1256,10 +1317,15 @@ async fn conf_page_update(
         "title": updated.title,
         "version": updated.version.as_ref().map(|v| v.number),
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     if !uploaded.is_empty() {
         env.warnings
             .push(format!("uploaded {} image(s) to page {id}", uploaded.len()));
+    }
+    if !mentions.is_empty() {
+        env.warnings
+            .push(format!("resolved {} mention(s)", mentions.len()));
     }
     env.emit();
     Ok(())
@@ -1819,12 +1885,19 @@ async fn jira_issue_create(
         (None, Vec::new())
     };
 
+    // Resolve @[query] mentions before conversion so the preview body
+    // contains real mention nodes.
+    let mentions = match md_source.as_deref() {
+        Some(md) => resolve_mentions_for(&client, md).await?,
+        None => BTreeMap::new(),
+    };
+
     let mut base = serde_json::Map::new();
     base.insert("project".into(), json!({ "key": project }));
     base.insert("issuetype".into(), json!({ "name": issue_type }));
     base.insert("summary".into(), json!(summary));
     if let Some(md) = md_source.as_deref() {
-        base.insert("description".into(), jc_adf::to_adf(md));
+        base.insert("description".into(), compile_adf(md, &mentions));
     }
 
     let fields_obj = build_fields_object(&cache, extra_fields, base)?;
@@ -1867,7 +1940,7 @@ async fn jira_issue_create(
         && let Some(md) = md_source.as_deref()
     {
         let rewritten = rewrite_image_urls(md, &replacements);
-        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let fixed_adf = compile_adf(&rewritten, &mentions);
         let edit_fields = json!({ "description": fixed_adf });
         if let Err(e) = jc_jira::issue::edit(&client, &created.key, &edit_fields).await {
             warnings.push(format!(
@@ -1882,12 +1955,16 @@ async fn jira_issue_create(
             ));
         }
     }
+    if !mentions.is_empty() {
+        warnings.push(format!("resolved {} mention(s)", mentions.len()));
+    }
 
     let mut env = Envelope::new(json!({
         "id": created.id,
         "key": created.key,
         "url": format!("https://{}/browse/{}", cfg.site, created.key),
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     env.warnings = warnings;
     env.emit();
@@ -1924,6 +2001,13 @@ async fn jira_issue_edit(
     };
     let _ = base_dir_buf; // retained for clarity; the paths inside `images` are already resolved
 
+    // Resolve any @[query] mentions in the description up front so the
+    // preview shows the proper mention nodes.
+    let mentions = match md_source.as_deref() {
+        Some(md) => resolve_mentions_for(&client, md).await?,
+        None => BTreeMap::new(),
+    };
+
     // Build the preview fields with the ORIGINAL markdown so local
     // image paths show up in the preview. The real upload+rewrite
     // happens after confirmation.
@@ -1932,7 +2016,7 @@ async fn jira_issue_edit(
         preview_base.insert("summary".into(), json!(s));
     }
     let preview_new_markdown = md_source.as_ref().map(|md| {
-        let adf = jc_adf::to_adf(md);
+        let adf = compile_adf(md, &mentions);
         let rendered = jc_adf::to_markdown(&adf);
         preview_base.insert("description".into(), adf);
         rendered
@@ -1989,7 +2073,7 @@ async fn jira_issue_edit(
     }
     if let Some(md) = md_source.as_deref() {
         let rewritten = rewrite_image_urls(md, &replacements);
-        final_base.insert("description".into(), jc_adf::to_adf(&rewritten));
+        final_base.insert("description".into(), compile_adf(&rewritten, &mentions));
     }
     let final_fields = build_fields_object(&cache, extra_fields, final_base)?;
 
@@ -1999,10 +2083,15 @@ async fn jira_issue_edit(
         "edited": true,
         "key": key,
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     }));
     if !uploaded.is_empty() {
         env.warnings
             .push(format!("uploaded {} image(s) to {key}", uploaded.len()));
+    }
+    if !mentions.is_empty() {
+        env.warnings
+            .push(format!("resolved {} mention(s)", mentions.len()));
     }
     env.emit();
     Ok(())
@@ -2028,11 +2117,14 @@ async fn publish(
     let base_dir = base_dir_of(body_file);
     let images = find_local_images(&md, base_dir);
 
-    // Phase 1 ADF (images still as links; phase 2 rewrites after upload).
-    let adf = jc_adf::to_adf(&md);
-
     let cfg = Config::from_env()?;
     let client = cfg.jira_client()?;
+    let mentions = resolve_mentions_for(&client, &md).await?;
+
+    // Phase 1 ADF: mentions resolved, images still as links. Phase 2
+    // rewrites images after the new page is created.
+    let adf = compile_adf(&md, &mentions);
+
     let space_id = jc_conf::space::resolve_id(&client, space_key).await?;
 
     // Step 1: Confluence create page
@@ -2108,7 +2200,7 @@ async fn publish(
     let mut warnings: Vec<String> = Vec::new();
     let final_version = if !replacements.is_empty() {
         let rewritten = rewrite_image_urls(&md, &replacements);
-        let fixed_adf = jc_adf::to_adf(&rewritten);
+        let fixed_adf = compile_adf(&rewritten, &mentions);
         let current_version = page.version.as_ref().map(|v| v.number).unwrap_or(1);
         let next_version = current_version + 1;
         let update_req = jc_conf::page::UpdatePageRequest {
@@ -2139,6 +2231,9 @@ async fn publish(
     } else {
         page.version.as_ref().map(|v| v.number)
     };
+    if !mentions.is_empty() {
+        warnings.push(format!("resolved {} mention(s)", mentions.len()));
+    }
 
     let mut data = json!({
         "page": {
@@ -2151,6 +2246,7 @@ async fn publish(
         },
         "comment": Value::Null,
         "uploaded_images": uploaded,
+        "resolved_mentions": mentions_summary(&mentions),
     });
 
     // Execute step 2 if requested. Partial failure surfaces as a warning
@@ -2220,6 +2316,23 @@ fn render_preview_with_images(
         }
     }
     Ok(())
+}
+
+/// Build the `resolved_mentions` block for a result envelope so the
+/// user / Claude Code can see which queries were resolved to which
+/// accountIds.
+fn mentions_summary(mentions: &BTreeMap<String, ResolvedMention>) -> Value {
+    let list: Vec<Value> = mentions
+        .iter()
+        .map(|(query, m)| {
+            json!({
+                "query": query,
+                "account_id": m.account_id,
+                "display_name": m.display_name,
+            })
+        })
+        .collect();
+    Value::Array(list)
 }
 
 fn emit_cancelled() {

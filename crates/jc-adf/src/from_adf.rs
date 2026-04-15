@@ -182,12 +182,23 @@ fn render_cell_inline(cell: &Value, out: &mut String) {
     }
 }
 
-/// Escape GFM table cell content: pipes become `\|`, and any embedded
-/// newlines become spaces (GFM tables are single-line per cell).
+/// Escape GFM table cell content.
+///
+/// GFM's cell-escape grammar: `\\` → `\`, `\|` → `|`. The order matters:
+/// backslash must be escaped first so the backslash in `\|` isn't itself
+/// interpreted. Without the backslash escape, a cell containing the
+/// literal text `\|` would round-trip as a cell terminator rather than
+/// as its original characters — a data-integrity bug, and a subtle way
+/// to smuggle cell boundaries through a round trip if cell content is
+/// attacker-controlled.
+///
+/// Embedded newlines collapse to spaces because GFM table cells are
+/// single-line by definition.
 fn escape_table_cell(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
+            '\\' => out.push_str("\\\\"),
             '|' => out.push_str("\\|"),
             '\n' | '\r' => out.push(' '),
             _ => out.push(ch),
@@ -358,21 +369,68 @@ fn build_wrapping_marks(marks: &[Value]) -> (String, String) {
 
 fn render_unknown_block(node: &Value, out: &mut String) {
     let ty = node_type(node);
-    out.push_str("```adf:");
+    let serialized = serde_json::to_string_pretty(node).unwrap_or_default();
+    // Pick a fence longer than any backtick run in the serialized body so
+    // a nested string literal containing ``` can't break out of the
+    // escape hatch. Minimum of 3 backticks keeps the output familiar.
+    let fence_len = longest_backtick_run(&serialized).max(2) + 1;
+    let fence = "`".repeat(fence_len);
+    out.push_str(&fence);
+    out.push_str("adf:");
     out.push_str(if ty.is_empty() { "unknown" } else { ty });
     out.push('\n');
-    out.push_str(&serde_json::to_string_pretty(node).unwrap_or_default());
+    out.push_str(&serialized);
+    if !serialized.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&fence);
     out.push('\n');
-    out.push_str("```\n");
 }
 
 fn render_unknown_inline(node: &Value, out: &mut String) {
     let ty = node_type(node);
-    out.push_str("`adf:");
-    out.push_str(if ty.is_empty() { "unknown" } else { ty });
-    out.push(':');
-    out.push_str(&serde_json::to_string(node).unwrap_or_default());
-    out.push('`');
+    let serialized = serde_json::to_string(node).unwrap_or_default();
+    let body = format!(
+        "adf:{}:{}",
+        if ty.is_empty() { "unknown" } else { ty },
+        serialized
+    );
+    // Inline code spans: opening and closing delimiters must use at least
+    // one more backtick than any run inside the body, otherwise a nested
+    // backtick terminates the span early. `longest_backtick_run + 1` with
+    // a minimum of 1 achieves that.
+    let fence_len = longest_backtick_run(&body) + 1;
+    let fence = "`".repeat(fence_len);
+    out.push_str(&fence);
+    // Pad leading/trailing space when the body starts or ends with a
+    // backtick — CommonMark strips exactly one such space on parse.
+    let pad_start = body.starts_with('`');
+    let pad_end = body.ends_with('`');
+    if pad_start {
+        out.push(' ');
+    }
+    out.push_str(&body);
+    if pad_end {
+        out.push(' ');
+    }
+    out.push_str(&fence);
+}
+
+/// Length of the longest consecutive run of backticks in `s`.
+fn longest_backtick_run(s: &str) -> usize {
+    let mut max_run = 0;
+    let mut current = 0;
+    for c in s.chars() {
+        if c == '`' {
+            current += 1;
+            if current > max_run {
+                max_run = current;
+            }
+        } else {
+            current = 0;
+        }
+    }
+    max_run
 }
 
 fn node_type(node: &Value) -> &str {
@@ -588,6 +646,59 @@ mod tests {
     }
 
     #[test]
+    fn escape_hatch_grows_fence_for_nested_backticks() {
+        // An ADF panel whose text field contains triple backticks could
+        // previously break out of the escape hatch. The renderer must
+        // pick a longer fence so the closing delimiter is unambiguous.
+        let d = doc(json!([{
+            "type": "panel",
+            "attrs": {"panelType": "info"},
+            "content": [{
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "nested ``` here"}]
+            }]
+        }]));
+        let md = to_markdown(&d);
+
+        // Opening fence must be ≥ 4 backticks because the content has 3.
+        let first_line = md.lines().next().unwrap();
+        let opening_fence_len = first_line.chars().take_while(|c| *c == '`').count();
+        assert!(
+            opening_fence_len >= 4,
+            "expected ≥4-backtick opening fence, got {opening_fence_len}: {md}"
+        );
+        assert!(first_line.ends_with("adf:panel"));
+
+        // Matching closing fence with the same length
+        let closing_fence = "`".repeat(opening_fence_len);
+        assert!(
+            md.contains(&format!("\n{closing_fence}\n")),
+            "missing matching closing fence ({opening_fence_len} backticks): {md}"
+        );
+    }
+
+    #[test]
+    fn escape_hatch_inline_grows_backticks() {
+        let d = doc(json!([{
+            "type": "paragraph",
+            "content": [
+                {"type": "text", "text": "before "},
+                {
+                    "type": "customInline",
+                    "attrs": {"note": "has a `backtick`"}
+                },
+                {"type": "text", "text": " after"}
+            ]
+        }]));
+        let md = to_markdown(&d);
+        // The inline escape hatch must not break the paragraph's flow,
+        // so it has to use ≥2 backticks to safely wrap the nested one.
+        assert!(md.contains("before "), "got: {md}");
+        assert!(md.contains(" after"), "got: {md}");
+        assert!(md.contains("adf:customInline:"), "got: {md}");
+    }
+
+    #[test]
     fn table_cell_escapes_pipe() {
         let d = doc(json!([{
             "type": "table",
@@ -606,5 +717,34 @@ mod tests {
         }]));
         let md = to_markdown(&d);
         assert!(md.contains("| a\\|b |"), "pipe not escaped: {md}");
+    }
+
+    #[test]
+    fn table_cell_escapes_backslash() {
+        // A cell containing the literal text "\|" must round-trip as
+        // "\|", not as "\" followed by a cell boundary. Fix requires
+        // escaping backslash before pipe.
+        let d = doc(json!([{
+            "type": "table",
+            "content": [
+                {"type": "tableRow", "content": [
+                    {"type": "tableHeader", "attrs": {}, "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "Raw"}]}
+                    ]}
+                ]},
+                {"type": "tableRow", "content": [
+                    {"type": "tableCell", "attrs": {}, "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "a\\|b"}]}
+                    ]}
+                ]}
+            ]
+        }]));
+        let md = to_markdown(&d);
+        // Expect: literal backslash escaped as \\, literal pipe escaped as \|
+        // → rendered cell should contain "a\\\\|b" (four chars: \ \ \ |)
+        assert!(
+            md.contains("| a\\\\\\|b |"),
+            "backslash-pipe not escaped correctly: {md}"
+        );
     }
 }

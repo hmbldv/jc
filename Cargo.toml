@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["hmbldv"]
@@ -24,10 +24,10 @@ categories = ["command-line-utilities", "api-bindings"]
 [workspace.dependencies]
 # Internal — both `path` (for local dev) and `version` (for crates.io
 # publishing) so `cargo publish` can resolve the inter-crate deps.
-jc-core = { path = "crates/jc-core", version = "0.1.0" }
-jc-adf = { path = "crates/jc-adf", version = "0.1.0" }
-jc-jira = { path = "crates/jc-jira", version = "0.1.0" }
-jc-conf = { path = "crates/jc-conf", version = "0.1.0" }
+jc-core = { path = "crates/jc-core", version = "0.2.0" }
+jc-adf = { path = "crates/jc-adf", version = "0.2.0" }
+jc-jira = { path = "crates/jc-jira", version = "0.2.0" }
+jc-conf = { path = "crates/jc-conf", version = "0.2.0" }
 
 # HTTP + async
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream", "gzip"] }

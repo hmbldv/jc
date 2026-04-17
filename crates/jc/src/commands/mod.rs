@@ -1111,7 +1111,7 @@ async fn conf_page_create(
 
     let url = format!("https://{}/wiki/api/v2/pages", cfg.site);
     let preview = Preview::new("POST", url)
-        .with_body(serde_json::to_value(&req).unwrap_or_else(|_| json!(null)))
+        .with_body(serde_json::to_value(&req).unwrap_or(Value::Null))
         .with_summary(format!("Create page '{title}' in space {space_key}"));
 
     match mode {
@@ -1248,7 +1248,7 @@ async fn conf_page_update(
 
     let url = format!("https://{}/wiki/api/v2/pages/{}", cfg.site, id);
     let preview = Preview::new("PUT", url)
-        .with_body(serde_json::to_value(&preview_req).unwrap_or_else(|_| json!(null)))
+        .with_body(serde_json::to_value(&preview_req).unwrap_or(Value::Null))
         .with_summary(format!(
             "Update page {id} '{title}' (v{current_version} -> v{next_version})"
         ))
@@ -2092,7 +2092,7 @@ async fn publish(
         body: jc_conf::page::BodyRequest::from_adf(&adf),
     };
     let page_preview = Preview::new("POST", format!("https://{}/wiki/api/v2/pages", cfg.site))
-        .with_body(serde_json::to_value(&page_req).unwrap_or_else(|_| json!(null)))
+        .with_body(serde_json::to_value(&page_req).unwrap_or(Value::Null))
         .with_summary(format!("Create page '{title}' in space {space_key}"));
 
     // Step 2: Jira comment (optional) — templated since real page URL is

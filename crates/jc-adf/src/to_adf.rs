@@ -173,11 +173,11 @@ fn handle_end(stack: &mut Vec<Frame>, marks: &mut Vec<Value>, end: TagEnd) {
         | TagEnd::List(_)
         | TagEnd::Table
         | TagEnd::TableHead
-        | TagEnd::TableRow => {
-            if stack.len() > 1 {
-                let node = close_frame(stack);
-                push_block(stack, node);
-            }
+        | TagEnd::TableRow
+            if stack.len() > 1 =>
+        {
+            let node = close_frame(stack);
+            push_block(stack, node);
         }
         _ => {}
     }
@@ -250,7 +250,7 @@ fn close_frame(stack: &mut Vec<Frame>) -> Value {
     }
 }
 
-fn push_block(stack: &mut Vec<Frame>, node: Value) {
+fn push_block(stack: &mut [Frame], node: Value) {
     // TableCell has a struct-variant shape; handle separately from the
     // tuple variants below.
     if let Some(Frame::TableCell { content, .. }) = stack.last_mut() {

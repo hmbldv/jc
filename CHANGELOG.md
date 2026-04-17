@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-17
+
 ### Fixed
 
 - **BREAKING BEHAVIORAL FIX — `jira issue link add` direction inversion.**

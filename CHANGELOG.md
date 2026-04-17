@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **BREAKING BEHAVIORAL FIX — `jira issue link add` direction inversion.**
+  In 0.1.0, `jc jira issue link add <KEY> --type Blocks --to <OTHER>` sent
+  `inwardIssue`/`outwardIssue` swapped relative to Atlassian's REST v3
+  convention, producing the inverse link direction in Jira (e.g. "KEY is
+  blocked by OTHER" instead of the documented "KEY blocks OTHER"). The bug
+  affected every directional link type (`Blocks`, `Duplicate`, `Clones`,
+  …); `Relates` is symmetric so no user-visible change there. The payload
+  assignments are now flipped to match the CLI help text, and the
+  library-level `jc_jira::issue_links::add` parameters have been renamed
+  from `outward_key`/`inward_key` to `from_key`/`to_key` to prevent the
+  same misreading recurring. Both the CLI dry-run preview and the actual
+  send now go through a single shared `build_add_request_body` helper, so
+  the two paths can no longer drift — the 0.1.0 bug existed as two
+  independent hand-written bodies. Unit tests exercise the helper across
+  `Blocks`, `Duplicate`, `Clones`, and `Relates` to lock in the direction
+  invariant (`from_key → inwardIssue`, `to_key → outwardIssue`).
+
+  **Migration:** links created with 0.1.0 using a directional type point
+  the opposite direction of the operator's intent. Audit with
+  `jc jira issue link list <KEY> --json` and recreate any links whose
+  direction matters for dashboards, JQL (`linkedIssues(X, "blocks")`),
+  or automations.
+
 ### Added
 
 - **Automatic retry with bounded backoff** (`jc-core::retry`). Every

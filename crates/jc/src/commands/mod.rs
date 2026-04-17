@@ -1600,8 +1600,8 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
             let url = format!("https://{}/rest/api/3/issueLink", cfg.site);
             let body = json!({
                 "type": { "name": link_type },
-                "inwardIssue": { "key": to },
-                "outwardIssue": { "key": key },
+                "inwardIssue": { "key": key },
+                "outwardIssue": { "key": to },
             });
             let preview = Preview::new("POST", url)
                 .with_body(body)

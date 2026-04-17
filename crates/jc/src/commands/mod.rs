@@ -1598,11 +1598,7 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
         JiraLinkCommand::Add { key, to, link_type } => {
             let cfg = Config::from_env()?;
             let url = format!("https://{}/rest/api/3/issueLink", cfg.site);
-            let body = json!({
-                "type": { "name": link_type },
-                "inwardIssue": { "key": key },
-                "outwardIssue": { "key": to },
-            });
+            let body = jc_jira::issue_links::build_add_request_body(&link_type, &key, &to);
             let preview = Preview::new("POST", url)
                 .with_body(body)
                 .with_summary(format!("Link {key} -[{link_type}]-> {to}"));

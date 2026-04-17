@@ -95,18 +95,30 @@ pub async fn list_on_issue(client: &Client, issue_key: &str) -> Result<Vec<Issue
     serde_json::from_value(links).map_err(ApiError::decode)
 }
 
-/// POST /rest/api/3/issueLink
+/// Build the JSON body for `POST /rest/api/3/issueLink`.
+///
+/// Canonical builder used by both `add()` and the CLI dry-run preview, so the
+/// two paths cannot drift in direction semantics (the 0.1.0 regression was
+/// two independent hand-written bodies disagreeing with Atlassian's convention).
 ///
 /// `from_key` is the source of the outward verb (the "blocker", "duplicator",
 /// etc.); `to_key` is the recipient. Per Atlassian convention this maps to
 /// `inwardIssue = from_key`, `outwardIssue = to_key`.
-pub async fn add(client: &Client, link_type: &str, from_key: &str, to_key: &str) -> Result<()> {
+pub fn build_add_request_body(link_type: &str, from_key: &str, to_key: &str) -> Value {
     let req = CreateLinkRequest {
         link_type: LinkTypeRef { name: link_type },
         inward: IssueRef { key: from_key },
         outward: IssueRef { key: to_key },
     };
-    client.post_no_content("rest/api/3/issueLink", &req).await
+    serde_json::to_value(&req).expect("CreateLinkRequest serializes to Value infallibly")
+}
+
+/// POST /rest/api/3/issueLink
+///
+/// See [`build_add_request_body`] for parameter direction semantics.
+pub async fn add(client: &Client, link_type: &str, from_key: &str, to_key: &str) -> Result<()> {
+    let body = build_add_request_body(link_type, from_key, to_key);
+    client.post_no_content("rest/api/3/issueLink", &body).await
 }
 
 /// DELETE /rest/api/3/issueLink/{id}
@@ -119,23 +131,26 @@ pub async fn remove(client: &Client, link_id: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Locks in Atlassian's REST v3 convention for `POST /rest/api/3/issueLink`:
-    /// `inwardIssue` is the source of the outward verb (the "blocker" for a
-    /// `Blocks` link) and `outwardIssue` is its target (the "blocked" issue).
+    /// The direction invariant: `from_key` → `inwardIssue`, `to_key` → `outwardIssue`.
     ///
-    /// The public `add(client, link_type, from_key, to_key)` is documented to
-    /// map `from_key` → `inwardIssue` and `to_key` → `outwardIssue`. This test
-    /// snapshots the exact JSON the typed request serializes to, so any future
-    /// swap of the field assignments re-breaks the same 0.1.0 regression and
-    /// fails here before reaching Jira.
+    /// Tests go through [`build_add_request_body`] — the same helper `add()`
+    /// uses — so a future swap of the parameter-to-field mapping (the 0.1.0
+    /// regression) fails here before reaching Jira. Tests that snapshot a
+    /// hand-constructed `CreateLinkRequest` wouldn't catch such a swap
+    /// because they bypass the parameter-ordering layer.
     #[test]
-    fn blocks_link_emits_from_as_inward_and_to_as_outward() {
-        let req = CreateLinkRequest {
-            link_type: LinkTypeRef { name: "Blocks" },
-            inward: IssueRef { key: "FOO-1" }, // from_key / blocker
-            outward: IssueRef { key: "FOO-2" }, // to_key / blocked
-        };
-        let body = serde_json::to_value(&req).unwrap();
+    fn from_key_maps_to_inward_issue_and_to_key_maps_to_outward_issue() {
+        let body = build_add_request_body("Blocks", "FOO-1", "FOO-2");
+        assert_eq!(body["inwardIssue"]["key"], "FOO-1");
+        assert_eq!(body["outwardIssue"]["key"], "FOO-2");
+    }
+
+    /// Full wire-format snapshot. Guards against accidental field renames
+    /// (e.g. if someone drops `#[serde(rename = "inwardIssue")]`) on top of
+    /// the direction invariant above.
+    #[test]
+    fn blocks_link_snapshot() {
+        let body = build_add_request_body("Blocks", "FOO-1", "FOO-2");
         assert_eq!(
             body,
             serde_json::json!({
@@ -144,5 +159,26 @@ mod tests {
                 "outwardIssue": {"key": "FOO-2"},
             })
         );
+    }
+
+    /// The payload mapping is type-agnostic, but the CHANGELOG explicitly
+    /// calls out `Duplicate` and `Clones` as affected by the 0.1.0 bug, so
+    /// make their correctness explicit too. `Relates` is symmetric in Jira's
+    /// default config, so user-visible direction doesn't matter — but the
+    /// wire format must still follow the same rule.
+    #[test]
+    fn direction_invariant_holds_across_link_types() {
+        for link_type in ["Blocks", "Duplicate", "Clones", "Relates"] {
+            let body = build_add_request_body(link_type, "A-1", "B-2");
+            assert_eq!(
+                body["inwardIssue"]["key"], "A-1",
+                "{link_type}: from_key must map to inwardIssue"
+            );
+            assert_eq!(
+                body["outwardIssue"]["key"], "B-2",
+                "{link_type}: to_key must map to outwardIssue"
+            );
+            assert_eq!(body["type"]["name"], link_type);
+        }
     }
 }

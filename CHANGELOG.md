@@ -18,8 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assignments are now flipped to match the CLI help text, and the
   library-level `jc_jira::issue_links::add` parameters have been renamed
   from `outward_key`/`inward_key` to `from_key`/`to_key` to prevent the
-  same misreading recurring. A unit-test snapshot of the outgoing JSON
-  locks in the correct orientation.
+  same misreading recurring. Both the CLI dry-run preview and the actual
+  send now go through a single shared `build_add_request_body` helper, so
+  the two paths can no longer drift — the 0.1.0 bug existed as two
+  independent hand-written bodies. Unit tests exercise the helper across
+  `Blocks`, `Duplicate`, `Clones`, and `Relates` to lock in the direction
+  invariant (`from_key → inwardIssue`, `to_key → outwardIssue`).
 
   **Migration:** links created with 0.1.0 using a directional type point
   the opposite direction of the operator's intent. Audit with

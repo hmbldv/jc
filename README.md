@@ -2,9 +2,29 @@
 
 **J**ira + **C**onfluence CLI, designed for Claude Code to consume.
 
+Jira's API is hostile to machine consumption — nested JSON with proprietary
+ADF payloads, no dry-run safety, and response shapes that vary by field
+configuration. `jc` fixes that: one binary, one JSON envelope per call,
+markdown in and out, and `--dry-run` on every mutation so agents can preview
+before they commit.
+
 A single Rust binary that turns Atlassian Cloud into a programmatic surface:
 JSON-first output, markdown-native input, `--dry-run` on every mutation, and
 full CRUD parity with whatever the authenticated user can do in the UI.
+
+> **For AI workflows** — `jc` is the missing layer between Claude Code (or any
+> agent) and Atlassian Cloud. It was built specifically so Claude Code can:
+> - Read issues, pages, and search results as clean JSON without post-processing
+>   ADF blobs
+> - Write markdown directly — the ADF conversion happens inside `jc`, not in
+>   the prompt
+> - Stage mutations with `--dry-run` and inspect the exact HTTP request before
+>   it fires — safe for agentic loops
+> - Surface structured errors (exit codes + JSON stderr) that are trivially
+>   parseable by tool-call wrappers
+>
+> See [`docs/CLAUDE.md`](docs/CLAUDE.md) for the pattern-oriented reference
+> that Claude Code reads when using the tool.
 
 ## Why this exists
 
@@ -101,7 +121,7 @@ jc config show   # redacted; reports which sources were used
 
 Any command that takes a `--body-file`, `--description-file`, or
 `--from-markdown` path treats the markdown as a first-class source and
-handles the rich-content pieces that plain text can't express:
+handles the rich content pieces that plain text can't express:
 
 - **GFM tables** round-trip through the ADF converter on both sides,
   including inline marks in cells and backslash-safe cell escaping.
@@ -153,12 +173,12 @@ give up and surface the 429 so the CLI doesn't block indefinitely.
 
 Cargo workspace, five crates:
 
-| Crate      | Purpose                                              |
-| ---------- | ---------------------------------------------------- |
+| Crate      | Purpose                                                 |
+| ---------- | ------------------------------------------------------ |
 | `jc`       | The binary: CLI, config, preview, logging, image + mention pre-processors |
 | `jc-core`  | Shared HTTP client, retry, auth, errors, cache       |
 | `jc-adf`   | Pure markdown ↔ Atlassian Document Format converter  |
-| `jc-jira`  | Jira Cloud REST v3 typed client                      |
+| `jc-jira`  | Jira Cloud REST v3 typed client                       |
 | `jc-conf`  | Confluence Cloud REST v2 typed client                |
 
 ## Status

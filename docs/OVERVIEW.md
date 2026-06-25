@@ -250,9 +250,11 @@ binary would muddy the concerns and make both halves worse.
   across HTTP statuses, exponential backoff schedule and overflow cap,
   literal-escape round-trip and backslash-before-quote ordering,
   relative-time allow-list, URL query scrubbing.
-- `jc-jira` (13): JQL builder (eq / contains / raw / order_by), string
+- `jc-jira` (23): JQL builder (eq / contains / raw / order_by), string
   escaping, transition fuzzy matcher (unique / ambiguous / not-found /
-  exact-wins-over-contains).
+  exact-wins-over-contains), issue-link direction invariant, dev-status
+  projection (verbatim provider-key discovery, integration-state
+  classification, PR/branch curation, dual-envelope build merge).
 - `jc` binary (29): control-character sanitization for TTY output,
   markdown image finder (local/remote classification, dedup, absolute
   paths, rewrite), markdown mention resolver (token finding, accountId

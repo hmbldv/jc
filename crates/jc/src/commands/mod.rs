@@ -11,7 +11,7 @@ use similar::TextDiff;
 use crate::cli::{
     Cli, Command, ConfAttachmentCommand, ConfCommand, ConfPageCommand, ConfSpaceCommand,
     ConfigCommand, FieldsSubcommand, JiraAttachmentCommand, JiraCommand, JiraCommentCommand,
-    JiraIssueCommand, JiraLinkCommand, JiraUserCommand,
+    JiraDevStatusCommand, JiraIssueCommand, JiraLinkCommand, JiraUserCommand,
 };
 use crate::config::Config;
 use crate::markdown_images::{FoundImage, find_local_images, rewrite_image_urls};
@@ -168,6 +168,9 @@ pub async fn dispatch(args: Cli) -> Result<(), CliError> {
         }
         Command::Jira(JiraCommand::Issue(JiraIssueCommand::Link(link_cmd))) => {
             jira_issue_link(link_cmd, mode).await
+        }
+        Command::Jira(JiraCommand::Issue(JiraIssueCommand::DevStatus(ds_cmd))) => {
+            jira_issue_dev_status(ds_cmd).await
         }
 
         Command::Conf(ConfCommand::Page(ConfPageCommand::Get { id })) => conf_page_get(&id).await,
@@ -1675,6 +1678,116 @@ async fn jira_issue_link(cmd: JiraLinkCommand, mode: PreviewMode) -> Result<(), 
             Ok(())
         }
     }
+}
+
+async fn jira_issue_dev_status(cmd: JiraDevStatusCommand) -> Result<(), CliError> {
+    use jc_jira::dev_status as ds;
+
+    let (key, app) = match &cmd {
+        JiraDevStatusCommand::Summary { key } => (key.clone(), None),
+        JiraDevStatusCommand::Pr { key, app }
+        | JiraDevStatusCommand::Branch { key, app }
+        | JiraDevStatusCommand::Build { key, app } => (key.clone(), app.clone()),
+    };
+
+    let client = jira_client()?;
+    // dev-status keys off the numeric id; resolve it from the key cheaply.
+    let issue_id = jc_jira::issue::get_id(&client, &key).await?;
+    // The summary is cheap and powers both the integration warning and (for
+    // the detail verbs) provider auto-discovery, so fetch it for every verb.
+    let summary_raw = ds::summary(&client, &issue_id).await?;
+    let warning = match ds::integration_state(&summary_raw) {
+        ds::IntegrationState::NoIntegration => Some(
+            "no development-tool integration found, or you lack the \
+             \"View development tools\" permission — results may be incomplete"
+                .to_string(),
+        ),
+        ds::IntegrationState::NoData => {
+            Some("no development information linked to this issue".to_string())
+        }
+        ds::IntegrationState::HasData => None,
+    };
+
+    // Detail verbs share the same shape: pick a data type and a projection,
+    // fan out across the discovered (or forced) providers, and concatenate.
+    let (data, providers): (Value, Option<Vec<String>>) = match &cmd {
+        JiraDevStatusCommand::Summary { .. } => (ds::project_summary(&summary_raw), None),
+        JiraDevStatusCommand::Pr { .. } => {
+            let (recs, apps) = dev_status_detail(
+                &client,
+                &issue_id,
+                "pullrequest",
+                app.as_deref(),
+                &summary_raw,
+                ds::project_pull_requests,
+            )
+            .await?;
+            (Value::Array(recs), Some(apps))
+        }
+        JiraDevStatusCommand::Branch { .. } => {
+            let (recs, apps) = dev_status_detail(
+                &client,
+                &issue_id,
+                "branch",
+                app.as_deref(),
+                &summary_raw,
+                ds::project_branches,
+            )
+            .await?;
+            (Value::Array(recs), Some(apps))
+        }
+        JiraDevStatusCommand::Build { .. } => {
+            let (recs, apps) = dev_status_detail(
+                &client,
+                &issue_id,
+                "build",
+                app.as_deref(),
+                &summary_raw,
+                ds::project_builds,
+            )
+            .await?;
+            (Value::Array(recs), Some(apps))
+        }
+    };
+
+    let mut env = Envelope::new(data);
+    if let Some(w) = warning {
+        env.warnings.push(w);
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert("issue".into(), json!(key));
+    meta.insert("issue_id".into(), json!(issue_id));
+    if let Some(apps) = providers {
+        meta.insert("providers".into(), json!(apps));
+    }
+    env.meta = Some(Value::Object(meta));
+    env.emit();
+    Ok(())
+}
+
+/// Fan a dev-status detail query out across providers and concatenate the
+/// projected records. Providers come from `--app` when given, otherwise from
+/// auto-discovery against the summary. Returns the records and the provider
+/// set actually queried (for `meta`).
+async fn dev_status_detail(
+    client: &Client,
+    issue_id: &str,
+    data_type: &str,
+    app: Option<&str>,
+    summary_raw: &Value,
+    project: impl Fn(&Value) -> Vec<Value>,
+) -> Result<(Vec<Value>, Vec<String>), CliError> {
+    let providers = match app {
+        Some(a) => vec![a.to_string()],
+        None => jc_jira::dev_status::providers_with_data(summary_raw, data_type),
+    };
+    let mut records = Vec::new();
+    for application_type in &providers {
+        let raw =
+            jc_jira::dev_status::detail(client, issue_id, data_type, application_type).await?;
+        records.extend(project(&raw));
+    }
+    Ok((records, providers))
 }
 
 async fn conf_attachment_list(page_id: &str, limit: usize) -> Result<(), CliError> {

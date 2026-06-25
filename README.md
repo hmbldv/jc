@@ -100,6 +100,8 @@ jc config show   # redacted; reports which sources were used
 - `jc jira issue attachment {list, get, upload}` — `get` writes to disk
   and prints the path for Claude Code to read
 - `jc jira issue link {list, add, remove, types}`
+- `jc jira issue dev-status {summary, pr, branch, build}` — the development
+  panel (branches, PRs, builds) linked through GitHub/Bitbucket/GitLab
 - `jc jira user {me, search}`
 - `jc jira jql <query>` — raw JQL escape hatch, cursor-paginated
 - `jc jira fields sync` — refreshes `~/.cache/jc/fields.json` so you can

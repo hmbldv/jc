@@ -12,6 +12,7 @@
 
 pub mod attachments;
 pub mod comment;
+pub mod dev_status;
 pub mod fields;
 pub mod issue;
 pub mod issue_links;

@@ -93,6 +93,22 @@ pub async fn get(client: &Client, key: &str) -> Result<Issue> {
 }
 
 #[derive(Debug, Deserialize)]
+struct IdOnly {
+    id: String,
+}
+
+/// GET /rest/api/3/issue/{key}?fields=id
+///
+/// Resolves a human-readable key (e.g. `FOO-123`) to its numeric issue id,
+/// requesting only the `id` field. Used by surfaces like dev-status that key
+/// off the numeric id rather than the issue key.
+pub async fn get_id(client: &Client, key: &str) -> Result<String> {
+    let path = format!("rest/api/3/issue/{key}?fields=id");
+    let issue: IdOnly = client.request_json(Method::GET, &path).await?;
+    Ok(issue.id)
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateResult {
     pub id: String,
     pub key: String,

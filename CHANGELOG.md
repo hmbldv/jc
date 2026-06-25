@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`jc jira issue dev-status {summary, pr, branch, build}`** — reads an
+  issue's development panel (branches, pull requests, builds linked through
+  GitHub/Bitbucket/GitLab) via the `/rest/dev-status/1.0/` API. `summary`
+  returns per-type counts and state in one round trip; the detail verbs
+  resolve the issue key to its numeric id, auto-discover which providers
+  have data, fan out, and emit a curated JSON projection. `--app <provider>`
+  forces a single provider, skipping discovery; the providers actually
+  queried are reported in `meta.providers`. Always exits 0 — an empty result
+  carries a `warnings` entry distinguishing "no dev info linked" from "no
+  integration / missing permission".
+
 ## [0.2.0] - 2026-04-17
 
 ### Fixed

@@ -249,6 +249,45 @@ pub enum JiraIssueCommand {
     /// Issue link operations.
     #[command(subcommand)]
     Link(JiraLinkCommand),
+
+    /// Development panel: branches, pull requests, and builds linked to the
+    /// issue through dev-tool integrations (GitHub / Bitbucket / GitLab / …).
+    #[command(subcommand)]
+    DevStatus(JiraDevStatusCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JiraDevStatusCommand {
+    /// Counts and overall state for each data type (single round trip).
+    Summary {
+        /// Issue key, e.g. FOO-123
+        key: String,
+    },
+    /// Pull requests linked to the issue.
+    Pr {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Force a single provider (e.g. github, bitbucket, stash, gitlab),
+        /// skipping auto-discovery from the summary.
+        #[arg(long)]
+        app: Option<String>,
+    },
+    /// Branches (with their last commit) linked to the issue.
+    Branch {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Force a single provider, skipping auto-discovery.
+        #[arg(long)]
+        app: Option<String>,
+    },
+    /// CI builds linked to the issue.
+    Build {
+        /// Issue key, e.g. FOO-123
+        key: String,
+        /// Force a single provider, skipping auto-discovery.
+        #[arg(long)]
+        app: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

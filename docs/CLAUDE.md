@@ -279,6 +279,25 @@ jc jira issue link types
 Assignee resolution: `me` → `currentUser()`; long alphanumeric strings
 are treated as accountIds; anything else is fed to user search.
 
+### Development status (branches, PRs, builds)
+
+```sh
+jc jira issue dev-status summary FOO-123          # counts + state per type
+jc jira issue dev-status pr FOO-123               # pull requests
+jc jira issue dev-status branch FOO-123           # branches + last commit
+jc jira issue dev-status build FOO-123            # CI builds
+jc jira issue dev-status pr FOO-123 --app github  # force a provider, skipping discovery
+```
+
+Reads the development panel via `/rest/dev-status/1.0/` (undocumented but
+the API the Jira UI itself uses). Each invocation resolves the issue key to
+its numeric id, fetches the summary, then — for the detail verbs —
+auto-discovers which providers (GitHub/Bitbucket/GitLab) have data and fans
+out, merging the results. The queried providers appear in `meta.providers`.
+Always exits 0: an empty result with a `warnings` entry distinguishes "no
+dev info linked" from "no integration / missing permission". `--app`
+overrides discovery to force one provider. `--limit` does not apply.
+
 ### User lookups
 
 ```sh
